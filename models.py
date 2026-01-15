@@ -17,6 +17,8 @@ class User(Base):
     citizenid = Column(String(50), unique=True, nullable=True)
     charinfo = Column(JSON, nullable=True)
     is_bound = Column(Boolean, default=False)
+    is_admin = Column(Boolean, default=False)
+    status = Column(String(20), default="active")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -43,6 +45,7 @@ class Item(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
+    price = Column(Integer, default=0)
     label = Column(String(100), nullable=True)
     type = Column(String(20), default="消耗品")
     image_url = Column(String(255))
@@ -75,3 +78,12 @@ class Banner(Base):
     sort_order = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class Announcement(Base):
+    __tablename__ = "announcements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    content = Column(String(255))
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

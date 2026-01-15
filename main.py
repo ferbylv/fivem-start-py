@@ -13,6 +13,7 @@ from Crypto.Util.Padding import unpad, pad
 import jwt
 # --- 数据库相关引入 ---
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from database import get_db, engine
 import models
 # ================= 配置区域 =================
@@ -313,8 +314,8 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
         "userId": user.id,
         "phone": user.phone,
         "nickname": user.nickname,
-
-        "isBound": user.is_bound
+        "isBound": user.is_bound,
+        "isAdmin": user.is_admin
     }
     # 生成 JWT
     token = jwt.encode(user_info, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -377,6 +378,16 @@ def get_server_status():
 def get_banners(db: Session = Depends(get_db)):
     banners = db.query(models.Banner).filter(models.Banner.is_active == True).order_by(models.Banner.sort_order.desc()).all()
     return {"success": True, "data": banners}
+
+
+# --- 3.1 获取最新公告 (公开) ---
+@app.get("/api/announcement")
+def get_public_announcement(db: Session = Depends(get_db)):
+    # 获取最新一条且 enabled=True 的公告
+    ann = db.query(models.Announcement).filter(models.Announcement.enabled == True).order_by(models.Announcement.id.desc()).first()
+    if not ann:
+        return {"success": True, "data": None}
+    return {"success": True, "data": ann}
 
 
 # --- 4. 获取我的资源 (读 MySQL - 包含车辆和物品) ---
@@ -649,6 +660,7 @@ def api_get_user_info(request: Request, db: Session = Depends(get_db)):
             # 所以这里只需构造 data 的内容。
             "userId":user.id,
             "isBound":user.is_bound,
+            "isAdmin":user.is_admin,
             "phone":user.phone,
             "nickname":user.nickname,
             "is_online": False, # 暂且写死或预留
@@ -670,4 +682,206 @@ def api_get_user_info(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Token验证失败: {e}")
         return {"success": False, "message": "Token无效"}
+
+
+# ================= 后台管理 API (Admin) =================
+
+def get_current_admin(request: Request, db: Session = Depends(get_db)):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未登录")
+    token = auth_header.split(" ")[1]
+    
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("userId")
+        user = db.query(models.User).filter(models.User.id == user_id).first()
+        if not user or not user.is_admin:
+            raise HTTPException(status_code=403, detail="无权限")
+        return user
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=401, detail="Token无效")
+
+
+# --- 1. Dashboard Overview ---
+@app.get("/api/admin/stats")
+def admin_get_stats(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    try:
+        total_users = db.query(models.User).count()
+        # total_sales: 暂时mock，或者统计UserInventory消耗？还没交易记录表，暂且mock
+        total_sales = 0
+        
+        # Check online count
+        status = check_fivem_server_status()
+        online_count = status.get("playerCount", 0)
+        
+        # active_today: 简单以updated_at为今天的用户? 暂且mock
+        active_today = 0
+        
+        return {
+            "success": True,
+            "data": {
+                "totalUsers": total_users,
+                "activeToday": active_today,
+                "totalSales": total_sales,
+                "onlineCount": online_count
+            }
+        }
+    except Exception as e:
+        print(e)
+        return {"success": False, "message": "获取统计失败"}
+
+
+# --- 2. Store Management ---
+@app.get("/api/admin/store/items")
+def admin_get_items(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    items = db.query(models.Item).all()
+    data = []
+    for item in items:
+        data.append({
+            "id": item.id,
+            "name": item.name,
+            "price": item.price,
+            "label": item.label,
+            "description": item.description,
+            "image": item.image_url
+        })
+    return {"success": True, "data": data}
+
+@app.post("/api/admin/store/items")
+def admin_create_item(item_data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    new_item = models.Item(
+        name=item_data.get("name"),
+        price=item_data.get("price", 0),
+        description=item_data.get("description"),
+        image_url=item_data.get("image"),
+        label=item_data.get("name") # 默认label同name
+    )
+    db.add(new_item)
+    db.commit()
+    db.refresh(new_item)
+    return {"success": True, "data": new_item.id}
+
+@app.put("/api/admin/store/items/{item_id}")
+def admin_update_item(item_id: int, item_data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    item = db.query(models.Item).filter(models.Item.id == item_id).first()
+    if not item: return {"success": False, "message": "物品不存在"}
+    
+    if "name" in item_data: item.name = item_data["name"]
+    if "price" in item_data: item.price = item_data["price"]
+    if "description" in item_data: item.description = item_data["description"]
+    if "image" in item_data: item.image_url = item_data["image"]
+    
+    db.commit()
+    return {"success": True}
+
+@app.delete("/api/admin/store/items/{item_id}")
+def admin_delete_item(item_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    item = db.query(models.Item).filter(models.Item.id == item_id).first()
+    if not item: return {"success": False, "message": "物品不存在"}
+    
+    db.delete(item)
+    db.commit()
+    return {"success": True}
+
+
+# --- 3. Announcement Management ---
+@app.get("/api/admin/announcement")
+def admin_get_announcement(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    # 获取最新一条
+    ann = db.query(models.Announcement).order_by(models.Announcement.id.desc()).first()
+    if not ann:
+        return {"success": True, "data": {"content": "", "enabled": False}}
+    return {"success": True, "data": {"content": ann.content, "enabled": ann.enabled}}
+
+@app.post("/api/admin/announcement")
+def admin_update_announcement(data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    # 直接新增一条记录作为最新状态，或者更新最新那条
+    # 这里选择：总是操作最新那条，如果没有则新增
+    ann = db.query(models.Announcement).order_by(models.Announcement.id.desc()).first()
+    if not ann:
+        ann = models.Announcement(content=data.get("content", ""), enabled=data.get("enabled", True))
+        db.add(ann)
+    else:
+        ann.content = data.get("content", "")
+        ann.enabled = data.get("enabled", True)
+    
+    db.commit()
+    return {"success": True}
+
+
+# --- 4. Banner Management ---
+@app.get("/api/admin/banners")
+def admin_get_banners(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    banners = db.query(models.Banner).order_by(models.Banner.sort_order.desc()).all()
+    data = []
+    for b in banners:
+        data.append({
+            "id": b.id,
+            "title": b.title,
+            "desc": b.desc,
+            "src": b.image_url,
+            "link": b.link_url,
+            "active": b.is_active
+        })
+    return {"success": True, "data": data}
+
+@app.post("/api/admin/banners")
+def admin_create_banner(data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    new_banner = models.Banner(
+        title=data.get("title"),
+        desc=data.get("desc"),
+        image_url=data.get("src"),
+        link_url=data.get("link"),
+        is_active=True
+    )
+    db.add(new_banner)
+    db.commit()
+    return {"success": True}
+
+@app.delete("/api/admin/banners/{banner_id}")
+def admin_delete_banner(banner_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    banner = db.query(models.Banner).filter(models.Banner.id == banner_id).first()
+    if banner:
+        db.delete(banner)
+        db.commit()
+    return {"success": True}
+
+
+# --- 5. User Management ---
+@app.get("/api/admin/users")
+def admin_get_users(q: str = None, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    query = db.query(models.User)
+    if q:
+        query = query.filter(or_(models.User.phone.like(f"{q}%"), models.User.nickname.like(f"%{q}%")))
+    
+    users = query.limit(50).all() # 限制返回数量
+    data = []
+    for u in users:
+        data.append({
+            "id": u.id,
+            "phone": u.phone,
+            "nickname": u.nickname,
+            "isAdmin": u.is_admin,
+            "status": u.status,
+            "joinDate": u.created_at.strftime("%Y-%m-%d") if u.created_at else ""
+        })
+    return {"success": True, "data": data}
+
+@app.post("/api/admin/users/{user_id}/ban")
+def admin_ban_user(user_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user:
+        user.status = "banned"
+        db.commit()
+    return {"success": True}
+
+@app.post("/api/admin/users/{user_id}/unban")
+def admin_unban_user(user_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user:
+        user.status = "active"
+        db.commit()
+    return {"success": True}
 # 启动命令: uvicorn main:app --reload
