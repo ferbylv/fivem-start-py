@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException,Body,Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
+from Crypto.Util.Padding import unpad, pad
 import jwt
 # --- 数据库相关引入 ---
 from sqlalchemy.orm import Session
@@ -28,6 +28,11 @@ AES_IV = b"1234567890123456"
 # JWT 配置
 JWT_SECRET = "your-jwt-secret-key"
 JWT_ALGORITHM = "HS256"
+
+# FiveM API Configuration
+FIVEM_SERVER_BASE = "http://192.168.50.77:30120"
+FIVEM_API_URL = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/get-player-info"
+FIVEM_API_TOKEN = "sk_your_secure_password_123456"
 
 # 模拟数据库
 verification_codes_db = {}
@@ -67,6 +72,18 @@ def decrypt_data(encrypted_text: str):
         return None
 
 
+# AES 加密工具
+def encrypt_data(data: dict):
+    try:
+        json_str = json.dumps(data)
+        cipher = AES.new(AES_SECRET_KEY, AES.MODE_CBC, AES_IV)
+        ct_bytes = cipher.encrypt(pad(json_str.encode('utf-8'), AES.block_size))
+        return base64.b64encode(ct_bytes).decode('utf-8')
+    except Exception as e:
+        print(f"加密失败: {e}")
+        return None
+
+
 # ================= 2. Spug 短信发送工具 (新) =================
 def send_spug_sms(phone: str, code: str):
     """
@@ -98,17 +115,15 @@ def send_spug_sms(phone: str, code: str):
         return False
 
 
-# 请求体模型
-class SendCodeRequest(BaseModel):
-    phone: str
 
 
-class LoginRequest(BaseModel):
+
+class EncryptedRequest(BaseModel):
     data: str
 
 # --- 1. Web端点击开始游戏接口 ---
 @app.post("/api/game/pre-auth")
-def game_pre_auth(request: Request, req: LoginRequest,db: Session = Depends(get_db)):
+def game_pre_auth(request: Request, req: EncryptedRequest,db: Session = Depends(get_db)):
     # 1. 解密用户信息
     payload = decrypt_data(req.data)
     if not payload:
@@ -141,16 +156,15 @@ def game_pre_auth(request: Request, req: LoginRequest,db: Session = Depends(get_
 
 
 # --- 2. FiveM端检查接口 ---
-class FiveMCheckRequest(BaseModel):
-    ip: str
-    license:str
-
-
 @app.post("/api/game/fivem-check")
-def fivem_check_ip(req: FiveMCheckRequest, db: Session = Depends(get_db)):
-    print(f"Web<UNK> -> <UNK>:{req.ip}, IP:{req}")
-    client_ip = req.ip
-    user_license=req.license
+def fivem_check_ip(req: EncryptedRequest, db: Session = Depends(get_db)):
+    payload = decrypt_data(req.data)
+    if not payload:
+        return {"success": False, "message": "非法请求"}
+    
+    client_ip = payload.get("ip")
+    user_license = payload.get("license")
+    
     print(f"Web<UNK> -> <UNK>:{client_ip}")
     # 1. 在字典里查找这个 IP
     record = ip_auth_db.get(client_ip)
@@ -195,10 +209,13 @@ def fivem_check_ip(req: FiveMCheckRequest, db: Session = Depends(get_db)):
 
 # --- 3. 玩家入服持久化接口 ---
 @app.post("/api/game/player-joined")
-def player_joined(req: dict = Body(...), db: Session = Depends(get_db)):
-    # 假设 FiveM 传来了: {"userId": 1, "license": "license:xxxx"}
-    user_id = req.get("userId")
-    fivem_license = req.get("license")  # 从请求中获取 License
+def player_joined(req: EncryptedRequest, db: Session = Depends(get_db)):
+    payload = decrypt_data(req.data)
+    if not payload:
+        return {"success": False, "message": "非法请求"}
+
+    user_id = payload.get("userId")
+    fivem_license = payload.get("license")  # 从请求中获取 License
     if user_id:
         user = db.query(models.User).filter(models.User.id == user_id).first()
         if user:
@@ -211,8 +228,12 @@ def player_joined(req: dict = Body(...), db: Session = Depends(get_db)):
     return {"success": False}
 # --- 发送验证码接口 ---
 @app.post("/api/send-code")
-def api_send_code(req: SendCodeRequest):
-    phone = req.phone
+def api_send_code(req: EncryptedRequest):
+    payload = decrypt_data(req.data)
+    if not payload:
+        raise HTTPException(status_code=400, detail="非法请求")
+        
+    phone = payload.get("phone")
     if not phone:
         raise HTTPException(status_code=400, detail="手机号不能为空")
 
@@ -241,7 +262,7 @@ def api_send_code(req: SendCodeRequest):
 
 # --- 登录接口 (保持不变) ---
 @app.post("/api/login")
-def api_login(req: LoginRequest, db: Session = Depends(get_db)):
+def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
     # 1. 解密前端数据
     payload = decrypt_data(req.data)
     if not payload:
@@ -307,6 +328,50 @@ def api_login(req: LoginRequest, db: Session = Depends(get_db)):
         "token": token,
         "userInfo": user_info
     }
+
+
+# ================= 辅助函数：检查 FiveM 服务器状态 =================
+def check_fivem_server_status():
+    """
+    仿照前端逻辑检查服务器状态
+    """
+    info_url = f"{FIVEM_SERVER_BASE}/info.json"
+    players_url = f"{FIVEM_SERVER_BASE}/players.json"
+    
+    try:
+        # 1. 请求 info.json (超时 2 秒)
+        resp = requests.get(info_url, timeout=2)
+        if resp.status_code == 200:
+            # 在线
+            player_count = 0
+            try:
+                # 2. 尝试获取在线人数
+                p_resp = requests.get(players_url, timeout=2)
+                if p_resp.status_code == 200:
+                    data = p_resp.json()
+                    if isinstance(data, list):
+                        player_count = len(data)
+            except:
+                pass # 获取人数失败不影响在线判定
+            
+            return {
+                "online": True,
+                "playerCount": player_count
+            }
+    except:
+        pass
+        
+    return {
+        "online": False,
+        "playerCount": 0,
+        "error": "Timeout or Network Error"
+    }
+
+
+# --- 新增接口：获取服务器状态 ---
+@app.get("/api/server/status")
+def get_server_status():
+    return check_fivem_server_status()
 # --- 3. 获取首页轮播图 (读 MySQL) ---
 @app.get("/api/banners")
 def get_banners(db: Session = Depends(get_db)):
@@ -317,42 +382,140 @@ def get_banners(db: Session = Depends(get_db)):
 # --- 4. 获取我的资源 (读 MySQL - 包含车辆和物品) ---
 # 这个接口前端 MySource 页面会用到
 @app.get("/api/user/assets")
-def get_user_assets(token: str, db: Session = Depends(get_db)):
+def get_user_assets(request: Request, db: Session = Depends(get_db)):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return {"success": False, "message": "未登录"}
+    token = auth_header.split(" ")[1]
+    
     try:
         # 解码 Token 获取 UserID
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         user_id = payload.get("userId")
-
+        print(payload)
         # 查询用户基础资产
         user = db.query(models.User).filter(models.User.id == user_id).first()
         if not user: raise HTTPException(status_code=404, detail="User not found")
+        
+        if not user.license:
+            return {"success": False, "message": "用户未绑定 FiveM 账号"}
 
+        # === 0. 检查服务器在线状态 ===
+        server_status = check_fivem_server_status()
+        
+        need_sync = False
+        if server_status["online"]:
+            need_sync = True
+            
+        if need_sync:
+            # === 1. 在线 -> 调用 FiveM API 获取最新数据 ===
+            try:
+                print(f"[Sync] Fetching data for {user.phone} ({user.license})...")
+                headers = {"Content-Type": "application/json", "Authorization": FIVEM_API_TOKEN}
+                body = {"license": user.license}
+                resp = requests.post(FIVEM_API_URL, json=body, headers=headers, timeout=5)
+                
+                if resp.status_code == 200:
+                    remote_data = resp.json()
+                    if remote_data.get("success"):
+                        r_data = remote_data["data"]
+                        
+                        # === 2. 同步用户基础信息 ===
+                        money = r_data.get("money", {})
+                        user.cash = money.get("cash", 0)
+                        user.bank = money.get("bank", 0)
+                        user.crypto = money.get("crypto", 0)
+                        user.citizenid = r_data.get("citizenid")
+                        user.charinfo = r_data.get("charinfo")
+                        
+                        # === 3. 同步背包物品 ===
+                        # 清空旧背包
+                        db.query(models.UserInventory).filter(models.UserInventory.user_id == user.id).delete()
+                        
+                        items_list = r_data.get("items", [])
+                        new_inventory = []
+                        
+                        for item_data in items_list:
+                            item_name = item_data.get("name")
+                            if item_name:
+                                db_item = db.query(models.Item).filter(models.Item.name == item_name).first()
+                                if not db_item:
+                                    db_item = models.Item(
+                                        name=item_name,
+                                        label=item_data.get("label"),
+                                        type=item_data.get("type", "item"),
+                                        image_url=item_data.get("image_url"),
+                                        description="Auto synced from FiveM"
+                                    )
+                                    db.add(db_item)
+                                    db.flush() 
+                                else:
+                                    if item_data.get("label"): db_item.label = item_data.get("label")
+                                    if item_data.get("image_url"): db_item.image_url = item_data.get("image_url")
+                                
+                                inv_record = models.UserInventory(
+                                    user_id=user.id,
+                                    item_id=db_item.id,
+                                    slot=item_data.get("slot", 1),
+                                    count=item_data.get("amount", 1),
+                                    info=item_data.get("info")
+                                )
+                                new_inventory.append(inv_record)
+                        
+                        if new_inventory:
+                            db.add_all(new_inventory)
+                        
+                        db.commit() 
+                        print(f"[Sync] Success for {user.phone}")
+                        
+                        # 直接返回远程数据
+                        return {"success": True, "data": encrypt_data(r_data)}
+                        # return {"success": True, "data": r_data}
+
+                print(f"FiveM API Sync Failed: {resp.text}")
+                
+            except Exception as e:
+                print(f"FiveM API Sync Error: {e}")
+                db.rollback()
+
+        # === Fallback: 离线 或 同步失败 -> 返回本地数据库数据 ===
+        print(f"[Fallback] Returning local data for {user.phone}")
+        
         # 查询车辆
-        vehicles = db.query(models.UserVehicle).filter(models.UserVehicle.user_id == user_id).all()
-
-        # 查询背包 (关联查询物品详情)
+        vehicles = db.query(models.UserVehicle).filter(models.UserVehicle.user_id == user_id).all() 
+        
+        # 查询背包
         inventory = db.query(models.UserInventory).filter(models.UserInventory.user_id == user_id).all()
-
-        # 格式化背包数据
         inventory_list = []
         for item in inventory:
-            if item.item_info:  # 确保有关联的物品信息
+            if item.item_info:
                 inventory_list.append({
-                    "id": item.item_info.id,
+                    "type": "item", 
+                    "label": item.item_info.label or item.item_info.name,
+                    "slot": item.slot,
                     "name": item.item_info.name,
-                    "type": item.item_info.type,
-                    "image": item.item_info.image_url,
-                    "count": item.count
+                    "image_url": item.item_info.image_url,
+                    "amount": item.count,
+                    "info": item.info or {}
                 })
-
-        return {
-            "success": True,
-            "data": {
-                "assets": {"cash": user.cash, "bank": user.bank},
-                "vehicles": vehicles,
-                "items": inventory_list
-            }
+        
+        local_data = {
+            "is_online": False, 
+            "money": {
+                "cash": user.cash,
+                "bank": user.bank,
+                "crypto": user.crypto
+            },
+            "vehicles": [], 
+            "license": user.license,
+            "citizenid": user.citizenid,
+            "charinfo": user.charinfo or {},
+            "items": inventory_list
         }
+        
+        return {"success": True, "data": encrypt_data(local_data)}
+        # return {"success": True, "data": local_data}
+
     except Exception as e:
         print(e)
         return {"success": False, "message": "认证失败"}
@@ -360,8 +523,12 @@ def get_user_assets(token: str, db: Session = Depends(get_db)):
 
 # --- 1. Web端获取绑定码 ---
 @app.post("/api/bind/get-code")
-def get_binding_code(req: dict = Body(...), db: Session = Depends(get_db)):
-    user_id = req.get("userId")
+def get_binding_code(req: EncryptedRequest, db: Session = Depends(get_db)):
+    payload = decrypt_data(req.data)
+    if not payload:
+        return {"success": False, "message": "非法请求"}
+
+    user_id = payload.get("userId")
     if not user_id:
         return {"success": False, "message": "用户ID不能为空"}
 
@@ -393,14 +560,14 @@ def get_binding_code(req: dict = Body(...), db: Session = Depends(get_db)):
 
 
 # --- 2. FiveM端使用绑定码查询用户 (给插件调用) ---
-class VerifyBindCodeRequest(BaseModel):
-    code: str
-    license:str
-
 @app.post("/api/bind/verify-code")
-def verify_binding_code(req: VerifyBindCodeRequest, db: Session = Depends(get_db)):
-    code = req.code
-    user_license=req.license
+def verify_binding_code(req: EncryptedRequest, db: Session = Depends(get_db)):
+    payload = decrypt_data(req.data)
+    if not payload:
+        return {"success": False, "message": "非法请求"}
+        
+    code = payload.get("code")
+    user_license = payload.get("license")
     record = manual_bind_db.get(code)
 
     # 检查是否存在且未过期
@@ -452,19 +619,53 @@ def api_get_user_info(request: Request, db: Session = Depends(get_db)):
         if not user:
             return {"success": False, "message": "用户不存在"}
 
-        # 4. 返回最新信息
+
+        # 4. 返回最新信息 (加密)
+        # 查询背包关联物品
+        inventory = db.query(models.UserInventory).filter(models.UserInventory.user_id == user_id).all()
+        
+        inventory_list = []
+        for item in inventory:
+            if item.item_info:
+                inventory_list.append({
+                    "type": "item",
+                    "label": item.item_info.label or item.item_info.name,
+                    "slot": item.slot,
+                    "name": item.item_info.name,
+                    "image_url": item.item_info.image_url,
+                    "amount": item.count,
+                    "info": item.info or {} # 默认为空字典
+                })
+
+        user_data = {
+            "success": True, # 外层已有 success: True, 但 payload 内部一般不需要再包一层，不过用户示例中有 "success": true 在最外层。
+            # 这里是 "data" 字段的内容。
+            # 用户给的 JSON 示例：
+            # {
+            #    "data": { ... },
+            #    "success": true
+            # }
+            # FastAPI 返回的也是 {"success": True, "data": ...}
+            # 所以这里只需构造 data 的内容。
+            "userId":user.id,
+            "isBound":user.is_bound,
+            "phone":user.phone,
+            "nickname":user.nickname,
+            "is_online": False, # 暂且写死或预留
+            "money": {
+                "cash": user.cash,
+                "crypto": user.crypto,
+                "bank": user.bank
+            },
+            "vehicles": [], # 按照要求，先为空
+            "license": user.license,
+            "citizenid": user.citizenid,
+            "charinfo": user.charinfo or {},
+            "items": inventory_list
+        }
         return {
             "success": True,
-            "data": {
-                "userId": user.id,
-                "phone": user.phone,
-                "nickname": user.nickname,
-                "license": user.license,
-                "isBound": user.is_bound,
-                # 如果你想在导航栏显示钱，也可以加上
-                "cash": user.cash,
-                "bank": user.bank
-            }
+            "data": encrypt_data(user_data)
         }
     except Exception as e:
         print(f"Token验证失败: {e}")
