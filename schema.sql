@@ -20,6 +20,8 @@ CREATE TABLE `users` (
   `charinfo` json DEFAULT NULL,
   `is_bound` tinyint(1) DEFAULT 0,
   `is_admin` tinyint(1) DEFAULT 0,
+  `is_super_admin` tinyint(1) DEFAULT 0,
+  `admin_permissions` json DEFAULT NULL,
   `status` varchar(20) DEFAULT 'active',
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
@@ -116,4 +118,22 @@ CREATE TABLE `announcements` (
   `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `ix_announcements_id` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for products
+-- ----------------------------
+DROP TABLE IF EXISTS `products`;
+CREATE TABLE `products` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `name` varchar(50) NOT NULL,
+  `price` int(11) DEFAULT 0,
+  `description` varchar(255) DEFAULT NULL,
+  `image_url` varchar(255) DEFAULT NULL,
+  `stock` int(11) DEFAULT 0,
+  `is_active` tinyint(1) DEFAULT 1,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_products_id` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

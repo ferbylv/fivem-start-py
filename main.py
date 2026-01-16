@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 import jwt
+from typing import Optional
 # --- 数据库相关引入 ---
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -154,17 +155,20 @@ def game_pre_auth(request: Request, req: EncryptedRequest,db: Session = Depends(
     }
 
     return {"success": True, "message": "预授权成功"}
-
+# 1. 修改请求模型，增加 license 字段
+class FiveMCheckRequest(BaseModel):
+    ip: str
+    license: Optional[str] = None # 新增：允许接收 license
 
 # --- 2. FiveM端检查接口 ---
 @app.post("/api/game/fivem-check")
-def fivem_check_ip(req: EncryptedRequest, db: Session = Depends(get_db)):
-    payload = decrypt_data(req.data)
-    if not payload:
-        return {"success": False, "message": "非法请求"}
-    
-    client_ip = payload.get("ip")
-    user_license = payload.get("license")
+def fivem_check_ip(req: FiveMCheckRequest, db: Session = Depends(get_db)):
+    # payload = decrypt_data(req.data)
+    # if not payload:
+    #     return {"success": False, "message": "非法请求"}
+    #
+    client_ip = req.ip
+    user_license = req.license
     
     print(f"Web<UNK> -> <UNK>:{client_ip}")
     # 1. 在字典里查找这个 IP
@@ -315,7 +319,8 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
         "phone": user.phone,
         "nickname": user.nickname,
         "isBound": user.is_bound,
-        "isAdmin": user.is_admin
+        "isAdmin": user.is_admin,
+        "status": user.status,
     }
     # 生成 JWT
     token = jwt.encode(user_info, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -371,7 +376,32 @@ def check_fivem_server_status():
 
 # --- 新增接口：获取服务器状态 ---
 @app.get("/api/server/status")
-def get_server_status():
+def get_server_status(request: Request, db: Session = Depends(get_db)):
+    # 1. Check Auth
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload.get("userId")
+            user = db.query(models.User).filter(models.User.id == user_id).first()
+            
+            if user and user.status == "banned":
+                 return {
+                     "success": False, 
+                     "code": 503, 
+                     "message": "当前账户已被封禁",
+                     "isBanned": True
+                 }
+        except Exception as e:
+            # Token invalid or expired, just ignore and return server status? 
+            # Or fail? User requirement implies using token to judge status.
+            # If token is bad, we can't judge status, so maybe just proceed or return 401.
+            # For "Server Status" page (often public), we usually allow access but check ban if logged in.
+            # But the requirement specifically says "use token to judge status".
+            print(f"Status check auth error: {e}")
+            pass
+
     return check_fivem_server_status()
 # --- 3. 获取首页轮播图 (读 MySQL) ---
 @app.get("/api/banners")
@@ -480,8 +510,8 @@ def get_user_assets(request: Request, db: Session = Depends(get_db)):
                         print(f"[Sync] Success for {user.phone}")
                         
                         # 直接返回远程数据
-                        return {"success": True, "data": encrypt_data(r_data)}
-                        # return {"success": True, "data": r_data}
+                        # return {"success": True, "data": encrypt_data(r_data)}
+                        return {"success": True, "data": r_data}
 
                 print(f"FiveM API Sync Failed: {resp.text}")
                 
@@ -569,16 +599,19 @@ def get_binding_code(req: EncryptedRequest, db: Session = Depends(get_db)):
     print(f"生成绑定码 -> User:{user.nickname}, Code:{code}")
     return {"success": True, "code": code}
 
+class CodeRequest(BaseModel):
+    code: str
+    license: Optional[str] = None # 新增：允许接收 license
 
 # --- 2. FiveM端使用绑定码查询用户 (给插件调用) ---
 @app.post("/api/bind/verify-code")
-def verify_binding_code(req: EncryptedRequest, db: Session = Depends(get_db)):
+def verify_binding_code(req: CodeRequest, db: Session = Depends(get_db)):
     payload = decrypt_data(req.data)
     if not payload:
         return {"success": False, "message": "非法请求"}
         
-    code = payload.get("code")
-    user_license = payload.get("license")
+    code = req.code
+    user_license = req.license
     record = manual_bind_db.get(code)
 
     # 检查是否存在且未过期
@@ -610,7 +643,23 @@ def verify_binding_code(req: EncryptedRequest, db: Session = Depends(get_db)):
         return {"success": False, "message": "绑定码无效或已过期"}
 
 
-# --- 新增：获取当前登录用户信息的专用接口 ---
+# --- 1.1 Store Public APIs ---
+@app.get("/api/store/products")
+def get_store_products(db: Session = Depends(get_db)):
+    query = db.query(models.Product).filter(models.Product.is_active == True)
+    
+    products = query.order_by(models.Product.id.desc()).all()
+    data = []
+    for p in products:
+        data.append({
+            "id": p.id,
+            "name": p.name,
+            "price": p.price,
+            "description": p.description,
+            "image": p.image_url,
+            "stock": p.stock
+        })
+    return {"success": True, "data": data}
 @app.get("/api/user/info")
 def api_get_user_info(request: Request, db: Session = Depends(get_db)):
     # 1. 从 Header 获取 Token (Authorization: Bearer <token>)
@@ -661,6 +710,8 @@ def api_get_user_info(request: Request, db: Session = Depends(get_db)):
             "userId":user.id,
             "isBound":user.is_bound,
             "isAdmin":user.is_admin,
+            "isSuperAdmin": user.is_super_admin,
+            "permissions": user.admin_permissions or [],
             "phone":user.phone,
             "nickname":user.nickname,
             "is_online": False, # 暂且写死或预留
@@ -696,11 +747,26 @@ def get_current_admin(request: Request, db: Session = Depends(get_db)):
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         user_id = payload.get("userId")
         user = db.query(models.User).filter(models.User.id == user_id).first()
-        if not user or not user.is_admin:
+        if not user or (not user.is_super_admin and not user.is_admin):
             raise HTTPException(status_code=403, detail="无权限")
         return user
-    except Exception as e:
-        print(e)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token无效")
+
+def get_current_super_admin(request: Request, db: Session = Depends(get_db)):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未登录")
+    token = auth_header.split(" ")[1]
+    
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("userId")
+        user = db.query(models.User).filter(models.User.id == user_id).first()
+        if not user or not user.is_super_admin:
+            raise HTTPException(status_code=403, detail="无权限")
+        return user
+    except Exception:
         raise HTTPException(status_code=401, detail="Token无效")
 
 
@@ -734,56 +800,63 @@ def admin_get_stats(admin: models.User = Depends(get_current_admin), db: Session
 
 
 # --- 2. Store Management ---
-@app.get("/api/admin/store/items")
-def admin_get_items(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    items = db.query(models.Item).all()
+# --- 2. Store Management (Products) ---
+@app.get("/api/admin/store/products")
+def admin_get_products(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    products = db.query(models.Product).all()
     data = []
-    for item in items:
+    for p in products:
         data.append({
-            "id": item.id,
-            "name": item.name,
-            "price": item.price,
-            "label": item.label,
-            "description": item.description,
-            "image": item.image_url
+            "id": p.id,
+            "name": p.name,
+            "price": p.price,
+            "description": p.description,
+            "image": p.image_url,
+            "stock": p.stock,
+            "isActive": p.is_active
         })
     return {"success": True, "data": data}
 
-@app.post("/api/admin/store/items")
-def admin_create_item(item_data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    new_item = models.Item(
-        name=item_data.get("name"),
-        price=item_data.get("price", 0),
-        description=item_data.get("description"),
-        image_url=item_data.get("image"),
-        label=item_data.get("name") # 默认label同name
+@app.post("/api/admin/store/products")
+def admin_create_product(data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    new_product = models.Product(
+        name=data.get("name"),
+        price=data.get("price", 0),
+        description=data.get("description"),
+        image_url=data.get("image"),
+        stock=data.get("stock", 0),
+        is_active=data.get("isActive", True)
     )
-    db.add(new_item)
+    db.add(new_product)
     db.commit()
-    db.refresh(new_item)
-    return {"success": True, "data": new_item.id}
+    db.refresh(new_product)
+    return {"success": True, "data": new_product.id}
 
-@app.put("/api/admin/store/items/{item_id}")
-def admin_update_item(item_id: int, item_data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    item = db.query(models.Item).filter(models.Item.id == item_id).first()
-    if not item: return {"success": False, "message": "物品不存在"}
+@app.put("/api/admin/store/products/{product_id}")
+def admin_update_product(product_id: int, data: dict = Body(...), admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product: return {"success": False, "message": "商品不存在"}
     
-    if "name" in item_data: item.name = item_data["name"]
-    if "price" in item_data: item.price = item_data["price"]
-    if "description" in item_data: item.description = item_data["description"]
-    if "image" in item_data: item.image_url = item_data["image"]
+    if "name" in data: product.name = data["name"]
+    if "price" in data: product.price = data["price"]
+    if "description" in data: product.description = data["description"]
+    if "image" in data: product.image_url = data["image"]
+    if "stock" in data: product.stock = data["stock"]
+    if "isActive" in data: product.is_active = data["isActive"]
     
     db.commit()
     return {"success": True}
 
-@app.delete("/api/admin/store/items/{item_id}")
-def admin_delete_item(item_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    item = db.query(models.Item).filter(models.Item.id == item_id).first()
-    if not item: return {"success": False, "message": "物品不存在"}
+@app.delete("/api/admin/store/products/{product_id}")
+def admin_delete_product(product_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product: return {"success": False, "message": "商品不存在"}
     
-    db.delete(item)
+    db.delete(product)
     db.commit()
     return {"success": True}
+
+
 
 
 # --- 3. Announcement Management ---
@@ -864,10 +937,42 @@ def admin_get_users(q: str = None, admin: models.User = Depends(get_current_admi
             "phone": u.phone,
             "nickname": u.nickname,
             "isAdmin": u.is_admin,
+            "isSuperAdmin": u.is_super_admin,
+            "permissions": u.admin_permissions or [],
             "status": u.status,
             "joinDate": u.created_at.strftime("%Y-%m-%d") if u.created_at else ""
         })
     return {"success": True, "data": data}
+
+@app.post("/api/admin/users/{user_id}/grant-admin")
+def admin_grant_role(user_id: int, permissions: list = Body(..., embed=True), admin: models.User = Depends(get_current_super_admin), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user:
+        user.is_admin = True
+        user.admin_permissions = permissions
+        db.commit()
+    return {"success": True}
+
+@app.post("/api/admin/users/{user_id}/revoke-admin")
+def admin_revoke_role(user_id: int, admin: models.User = Depends(get_current_super_admin), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user:
+        user.is_admin = False
+        user.admin_permissions = []
+        db.commit()
+    return {"success": True}
+
+@app.put("/api/admin/users/{user_id}/permissions")
+def admin_update_permissions(user_id: int, permissions: list = Body(..., embed=True), admin: models.User = Depends(get_current_super_admin), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        return {"success": False, "message": "用户不存在"}
+    if not user.is_admin:
+        return {"success": False, "message": "该用户不是管理员"}
+        
+    user.admin_permissions = permissions
+    db.commit()
+    return {"success": True}
 
 @app.post("/api/admin/users/{user_id}/ban")
 def admin_ban_user(user_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):

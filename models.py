@@ -18,6 +18,8 @@ class User(Base):
     charinfo = Column(JSON, nullable=True)
     is_bound = Column(Boolean, default=False)
     is_admin = Column(Boolean, default=False)
+    is_super_admin = Column(Boolean, default=False)
+    admin_permissions = Column(JSON, nullable=True) # e.g. ["dashboard", "store", "users"]
     status = Column(String(20), default="active")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -52,7 +54,21 @@ class Item(Base):
     description = Column(String(255))
 
     # 反向关联（可选）
+    # 反向关联（可选）
     inventory_records = relationship("UserInventory", back_populates="item_info")
+
+class Product(Base):
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Integer, default=0)
+    description = Column(String(255))
+    image_url = Column(String(255))
+    stock = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 class UserInventory(Base):
     __tablename__ = "user_inventory"
