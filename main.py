@@ -11,13 +11,14 @@ from pydantic import BaseModel
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 import jwt
+import datetime
 from typing import Optional
 # --- 数据库相关引入 ---
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from database import get_db, engine
 import models
-from routers import subscription, ticket,store
+from routers import subscription, ticket, store, payment
 # ================= 配置区域 =================
 
 # Spug 推送助手 URL (请替换为你自己的真实 URL)
@@ -37,6 +38,15 @@ FIVEM_SERVER_BASE = "http://192.168.50.77:30120"
 FIVEM_API_URL = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/get-player-info"
 FIVEM_API_TOKEN = "sk_your_secure_password_123456"
 
+# Alipay Configuration
+ALIPAY_APPID = "your_alipay_appid"
+ALIPAY_DEBUG = True # True for Sandbox
+# keys usually read from files, but for config we can restart or just point to paths
+ALIPAY_PRIVATE_KEY_PATH = "keys/app_private_key.pem"
+ALIPAY_PUBLIC_KEY_PATH = "keys/alipay_public_key.pem"
+ALIPAY_NOTIFY_URL = "http://your-domain.com/api/payment/alipay/notify"
+ALIPAY_RETURN_URL = "http://your-domain.com/payment/result"
+
 # 模拟数据库
 verification_codes_db = {}
 ip_auth_db = {}
@@ -45,6 +55,7 @@ app = FastAPI()
 app.include_router(subscription.router, prefix="/api", tags=["Subscription"])
 app.include_router(ticket.router, prefix="/api", tags=["Ticket"])
 app.include_router(store.router, prefix="/api", tags=["Store"])
+app.include_router(payment.router, prefix="/api", tags=["Payment"])
 verification_codes_db["15143933787"] = {
             "code": "123456",
             # -------------------------------------------------
@@ -936,7 +947,7 @@ def admin_get_users(q: str = None, admin: models.User = Depends(get_current_admi
     users = query.limit(50).all() # 限制返回数量
     data = []
     for u in users:
-        data.append({
+        user_data = {
             "id": u.id,
             "phone": u.phone,
             "nickname": u.nickname,
@@ -944,8 +955,31 @@ def admin_get_users(q: str = None, admin: models.User = Depends(get_current_admi
             "isSuperAdmin": u.is_super_admin,
             "permissions": u.admin_permissions or [],
             "status": u.status,
-            "joinDate": u.created_at.strftime("%Y-%m-%d") if u.created_at else ""
-        })
+            "joinDate": u.created_at.strftime("%Y-%m-%d") if u.created_at else "",
+            "subscription": None,
+            "totalSpend": 0
+        }
+        
+        # Get Active Subscription
+        active_sub = db.query(models.UserSubscription).join(models.SubscriptionPlan).filter(
+            models.UserSubscription.user_id == u.id,
+            models.UserSubscription.status == "active",
+            models.UserSubscription.end_date > datetime.datetime.now()
+        ).order_by(models.UserSubscription.end_date.desc()).first()
+        
+        if active_sub:
+             plan = db.query(models.SubscriptionPlan).filter(models.SubscriptionPlan.id == active_sub.plan_id).first()
+             if plan:
+                user_data["subscription"] = plan.name
+
+        # Get Total Spend
+        total_spend = db.query(func.sum(models.Order.total_amount)).filter(
+            models.Order.user_id == u.id,
+            models.Order.status == "completed"
+        ).scalar()
+        user_data["totalSpend"] = total_spend or 0
+        
+        data.append(user_data)
     return {"success": True, "data": data}
 
 @app.post("/api/admin/users/{user_id}/grant-admin")
