@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from database import get_db, engine
 import models
+from routers import subscription, ticket,store
 # ================= 配置区域 =================
 
 # Spug 推送助手 URL (请替换为你自己的真实 URL)
@@ -41,6 +42,9 @@ verification_codes_db = {}
 ip_auth_db = {}
 manual_bind_db = {}
 app = FastAPI()
+app.include_router(subscription.router, prefix="/api", tags=["Subscription"])
+app.include_router(ticket.router, prefix="/api", tags=["Ticket"])
+app.include_router(store.router, prefix="/api", tags=["Store"])
 verification_codes_db["15143933787"] = {
             "code": "123456",
             # -------------------------------------------------

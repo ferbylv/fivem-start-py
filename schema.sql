@@ -137,3 +137,113 @@ CREATE TABLE `products` (
   PRIMARY KEY (`id`),
   KEY `ix_products_id` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for subscription_plans
+-- ----------------------------
+DROP TABLE IF EXISTS `subscription_plans`;
+CREATE TABLE `subscription_plans` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `name` varchar(50) NOT NULL,
+  `price` int(11) DEFAULT 0,
+  `duration` int(11) DEFAULT 30,
+  `description` varchar(255) DEFAULT NULL,
+  `is_active` tinyint(1) DEFAULT 1,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_subscription_plans_id` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for user_subscriptions
+-- ----------------------------
+DROP TABLE IF EXISTS `user_subscriptions`;
+CREATE TABLE `user_subscriptions` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) NOT NULL,
+  `plan_id` int(11) NOT NULL,
+  `start_date` datetime DEFAULT CURRENT_TIMESTAMP,
+  `end_date` datetime NOT NULL,
+  `status` varchar(20) DEFAULT 'active',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_user_subscriptions_id` (`id`),
+  KEY `user_id` (`user_id`),
+  KEY `plan_id` (`plan_id`),
+  CONSTRAINT `user_subscriptions_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `user_subscriptions_ibfk_2` FOREIGN KEY (`plan_id`) REFERENCES `subscription_plans` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for tickets
+-- ----------------------------
+DROP TABLE IF EXISTS `tickets`;
+CREATE TABLE `tickets` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) NOT NULL,
+  `title` varchar(100) NOT NULL,
+  `type` varchar(20) DEFAULT 'bug',
+  `status` varchar(20) DEFAULT 'open',
+  `content` varchar(2000) DEFAULT NULL,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_tickets_id` (`id`),
+  KEY `user_id` (`user_id`),
+  CONSTRAINT `tickets_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for ticket_messages
+-- ----------------------------
+DROP TABLE IF EXISTS `ticket_messages`;
+CREATE TABLE `ticket_messages` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `ticket_id` bigint(20) NOT NULL,
+  `sender_role` varchar(20) NOT NULL,
+  `content` varchar(2000) NOT NULL,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_ticket_messages_id` (`id`),
+  KEY `ticket_id` (`ticket_id`),
+  CONSTRAINT `ticket_messages_ibfk_1` FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for orders
+-- ----------------------------
+DROP TABLE IF EXISTS `orders`;
+CREATE TABLE `orders` (
+  `id` varchar(50) NOT NULL,
+  `user_id` bigint(20) NOT NULL,
+  `type` varchar(20) DEFAULT 'product',
+  `total_amount` int(11) DEFAULT 0,
+  `status` varchar(20) DEFAULT 'completed',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `user_id` (`user_id`),
+  CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for order_items
+-- ----------------------------
+DROP TABLE IF EXISTS `order_items`;
+CREATE TABLE `order_items` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `order_id` varchar(50) NOT NULL,
+  `product_id` int(11) DEFAULT NULL,
+  `plan_id` int(11) DEFAULT NULL,
+  `item_name` varchar(100) DEFAULT NULL,
+  `price` int(11) DEFAULT 0,
+  `quantity` int(11) DEFAULT 1,
+  PRIMARY KEY (`id`),
+  KEY `ix_order_items_id` (`id`),
+  KEY `order_id` (`order_id`),
+  KEY `product_id` (`product_id`),
+  KEY `plan_id` (`plan_id`),
+  CONSTRAINT `order_items_ibfk_1` FOREIGN KEY (`order_id`) REFERENCES `orders` (`id`),
+  CONSTRAINT `order_items_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`),
+  CONSTRAINT `order_items_ibfk_3` FOREIGN KEY (`plan_id`) REFERENCES `subscription_plans` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

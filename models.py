@@ -103,3 +103,80 @@ class Announcement(Base):
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class SubscriptionPlan(Base):
+    __tablename__ = "subscription_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Integer, default=0)
+    duration = Column(Integer, default=30) # days
+    description = Column(String(255))
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class UserSubscription(Base):
+    __tablename__ = "user_subscriptions"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), nullable=False)
+    plan_id = Column(Integer, ForeignKey("subscription_plans.id"), nullable=False)
+    start_date = Column(DateTime, default=func.now())
+    end_date = Column(DateTime, nullable=False)
+    status = Column(String(20), default="active") # active, expired
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class Ticket(Base):
+    __tablename__ = "tickets"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), nullable=False)
+    title = Column(String(100), nullable=False)
+    type = Column(String(20), default="bug") # bug, account, payment, other
+    status = Column(String(20), default="open") # open, replied, closed
+    content = Column(String(2000)) # Initial content
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    owner = relationship("User")
+    messages = relationship("TicketMessage", back_populates="ticket", cascade="all, delete-orphan")
+
+class TicketMessage(Base):
+    __tablename__ = "ticket_messages"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    ticket_id = Column(BigInteger, ForeignKey("tickets.id"), nullable=False)
+    sender_role = Column(String(20), nullable=False) # 'user' or 'admin'
+    content = Column(String(2000), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    ticket = relationship("Ticket", back_populates="messages")
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id = Column(String(50), primary_key=True) # e.g. ORD-12345
+    user_id = Column(BigInteger, ForeignKey("users.id"), nullable=False)
+    type = Column(String(20), default="product") # product, subscription
+    total_amount = Column(Integer, default=0)
+    status = Column(String(20), default="completed") # pending, completed, failed
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    owner = relationship("User")
+    items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    order_id = Column(String(50), ForeignKey("orders.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True) # If type=product
+    plan_id = Column(Integer, ForeignKey("subscription_plans.id"), nullable=True) # If type=subscription
+    item_name = Column(String(100)) # Snapshot of name
+    price = Column(Integer, default=0) # Snapshot of price
+    quantity = Column(Integer, default=1)
+    
+    order = relationship("Order", back_populates="items")
+    product = relationship("Product")
+    plan = relationship("SubscriptionPlan")
