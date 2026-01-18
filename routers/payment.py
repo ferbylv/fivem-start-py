@@ -4,7 +4,9 @@ import models
 from database import get_db
 from dependencies import get_current_user
 import uuid
+import requests
 import datetime
+
 import os
 import ssl
 
@@ -189,7 +191,7 @@ def create_alipay_payment(data: dict = Body(...), user: models.User = Depends(ge
             out_trade_no=order_id,
             total_amount=amount_str,
             return_url="http://localhost:3000/", # Frontend return page (Synchronous)
-            notify_url="https://f32023bdc6fe.ngrok-free.app/api/payment/alipay/notify" # Asynchronous Callback (MUST BE PUBLIC)
+            notify_url="https://6696819b56da.ngrok-free.app/api/payment/alipay/notify" # Asynchronous Callback (MUST BE PUBLIC)
         )
         
         gateway = "https://openapi-sandbox.dl.alipaydev.com/gateway.do" if ALIPAY_DEBUG else "https://openapi.alipay.com/gateway.do"
@@ -267,21 +269,57 @@ def fulfill_order(order, db: Session):
                    db.add(new_sub)
 
     elif order.type == "product":
-        # Add to inventory
+        # Add to inventory logic (existing)
+        # Check Vehicle Delivery
+        all_delivered = True
+        has_vehicle = False
+        
         for item in order.items:
+            # Grant Vehicle if applicable
             if item.product_id:
-                # Add product to inventory
-                # Assuming product maps to an Item? 
-                # Model check: Product table has no link to Item table.
-                # Product is for Store. Item is for Game.
-                # Usually we map Product -> Item ID. But currently Product has no item_id.
-                # Maybe Product IS the item?
-                # User Inventory user_id, item_id, count.
-                # Product: id, name.
-                # If these are separate, we need a mapping "Product gives Item X".
-                # For now, I'll assume Product ID matches Item ID or Product gives "credits" or we just log it.
-                # Wait, earlier refactor separated Product and Item. 
-                # If we Buy "Product A", we expect "Item A" in inventory.
-                # I'll assumne Product.name matches Item.name or similar, or I should have added `item_id` to Product.
-                # **Assumption**: Product Grants Item logic is pending. I will log a TODO or try match by name.
-                pass 
+                product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+                if product and product.vehicle_model:
+                     has_vehicle = True
+                     # Call FiveM API
+                     success = give_vehicle_to_fivem(user.license, product.vehicle_model, product.garage)
+                     if not success:
+                         all_delivered = False
+                         
+        if has_vehicle and all_delivered:
+             order.is_delivered = True
+             
+        # TODO: Add logic for standard items (Inventory) if needed
+        # Currently assuming 'Product' only triggers Vehicle Delivery or purely monetary/credits transaction stored elsewhere, 
+        # or relying on FiveM Sync to update inventory later. 
+
+def give_vehicle_to_fivem(license, vehicle, garage):
+    """
+    Call FiveM API to give vehicle
+    """
+    # url = "http://192.168.50.77:30120/api/give-vehicle"
+    # Or use FIVEM_SERVER_BASE if we import
+    FIVEM_SERVER_BASE = "http://192.168.50.77:30120"
+    url = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/give-vehicle"
+    payload = {
+        "license": license,
+        "vehicle": vehicle,
+        "garage": garage or "pillboxgarage" # Default garage if None
+    }
+    
+    # We need a token. Using the same one from main.py if possible.
+    # Hardcoding valid token for now as per previous instructions or environment variable.
+    # Ideally should be consistent.
+    token = "sk_your_secure_password_123456" 
+    
+    try:
+        print(f"[VehicleDelivery] Sending {vehicle} to {license}")
+        resp = requests.post(url, json=payload, headers={"Authorization": token}, timeout=5)
+        if resp.status_code == 200 and resp.json().get("success"):
+             print(f"[VehicleDelivery] Success: {resp.json()}")
+             return True
+        else:
+             print(f"[VehicleDelivery] Failed: {resp.text}")
+             return False
+    except Exception as e:
+        print(f"[VehicleDelivery] Exception: {e}")
+        return False

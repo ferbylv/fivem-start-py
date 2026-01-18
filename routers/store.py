@@ -18,11 +18,49 @@ def get_store_products(db: Session = Depends(get_db)):
             "id": p.id,
             "name": p.name,
             "price": p.price,
+            "originalPrice": p.original_price,
             "description": p.description,
             "image": p.image_url,
             "stock": p.stock
         })
     return {"success": True, "data": data}
+
+@router.post("/store/pending-vehicles")
+def get_pending_vehicles(data: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Get pending vehicles for a user by license
+    """
+    license_str = data.get("license")
+    if not license_str:
+        return {"success": False, "message": "License required"}
+        
+    user = db.query(models.User).filter(models.User.license == license_str).first()
+    if not user:
+        return {"success": False, "message": "User not found"}
+        
+    # Find orders: completed, not delivered (or partially delivered logic if complex, but here simplistic is_delivered=False)
+    # Note: is_delivered is on Order level.
+    orders = db.query(models.Order).filter(
+        models.Order.user_id == user.id,
+        models.Order.status == "completed",
+        models.Order.type == "product",
+        models.Order.is_delivered == False
+    ).all()
+    
+    pending_list = []
+    
+    for o in orders:
+        for item in o.items:
+            if item.product_id:
+                product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+                if product and product.vehicle_model:
+                     pending_list.append({
+                         "orderId": o.id,
+                         "vehicle": product.vehicle_model,
+                         "garage": product.garage
+                     })
+                     
+    return {"success": True, "data": pending_list}
 
 # --- Admin Product APIs ---
 
@@ -35,9 +73,12 @@ def admin_get_products(admin: models.User = Depends(get_current_admin), db: Sess
             "id": p.id,
             "name": p.name,
             "price": p.price,
+            "originalPrice": p.original_price,
             "description": p.description,
             "image": p.image_url,
             "stock": p.stock,
+            "vehicleModel": p.vehicle_model,
+            "garage": p.garage,
             "isActive": p.is_active
         })
     return {"success": True, "data": data}
@@ -47,8 +88,11 @@ def admin_create_product(data: dict = Body(...), admin: models.User = Depends(ge
     new_product = models.Product(
         name=data.get("name"),
         price=data.get("price", 0),
+        original_price=data.get("originalPrice") or data.get("price", 0),
         description=data.get("description"),
         image_url=data.get("image"),
+        vehicle_model=data.get("vehicleModel"),
+        garage=data.get("garage"),
         stock=data.get("stock", 0),
         is_active=data.get("isActive", True)
     )
@@ -64,10 +108,18 @@ def admin_update_product(product_id: int, data: dict = Body(...), admin: models.
     
     if "name" in data: product.name = data["name"]
     if "price" in data: product.price = data["price"]
+    if "originalPrice" in data: 
+        # If passed valid value use it, if explicit null/0/empty use price? 
+        # Requirement: "If field is empty then same as price".
+        val = data["originalPrice"]
+        product.original_price = val if val else (data.get("price") or product.price)
+    
     if "description" in data: product.description = data["description"]
     if "image" in data: product.image_url = data["image"]
     if "stock" in data: product.stock = data["stock"]
     if "isActive" in data: product.is_active = data["isActive"]
+    if "vehicleModel" in data: product.vehicle_model = data["vehicleModel"]
+    if "garage" in data: product.garage = data["garage"]
     
     db.commit()
     return {"success": True}
@@ -130,6 +182,7 @@ def admin_get_orders(
             "itemName": item_name,
             "amount": o.total_amount,
             "status": o.status,
+            "isDelivered": o.is_delivered,
             "createdAt": o.created_at.strftime("%Y-%m-%d %H:%M:%S")
         })
         

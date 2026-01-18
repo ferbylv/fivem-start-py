@@ -63,6 +63,9 @@ class Product(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
     price = Column(Integer, default=0)
+    original_price = Column(Integer, default=0) # New field
+    vehicle_model = Column(String(50), nullable=True) # FiveM vehicle spawn code
+    garage = Column(String(50), nullable=True) # Target garage
     description = Column(String(255))
     image_url = Column(String(255))
     stock = Column(Integer, default=0)
@@ -161,6 +164,7 @@ class Order(Base):
     type = Column(String(20), default="product") # product, subscription
     total_amount = Column(Integer, default=0)
     status = Column(String(20), default="completed") # pending, completed, failed
+    is_delivered = Column(Boolean, default=False) # Whether remote assets (vehicle) delivered
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     owner = relationship("User")

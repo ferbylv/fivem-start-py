@@ -12,6 +12,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad, pad
 import jwt
 import datetime
+from datetime import timedelta
 from typing import Optional
 # --- 数据库相关引入 ---
 from sqlalchemy.orm import Session
@@ -36,6 +37,7 @@ JWT_ALGORITHM = "HS256"
 # FiveM API Configuration
 FIVEM_SERVER_BASE = "http://192.168.50.77:30120"
 FIVEM_API_URL = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/get-player-info"
+FIVEM_BAN_API_URL = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/ban-player"
 FIVEM_API_TOKEN = "sk_your_secure_password_123456"
 
 # Alipay Configuration
@@ -51,6 +53,9 @@ ALIPAY_RETURN_URL = "http://your-domain.com/payment/result"
 verification_codes_db = {}
 ip_auth_db = {}
 manual_bind_db = {}
+# IP Ratings
+ip_request_history = {} # IP -> [timestamp1, timestamp2, ...]
+blocked_ips = set() # {ip1, ip2}
 app = FastAPI()
 app.include_router(subscription.router, prefix="/api", tags=["Subscription"])
 app.include_router(ticket.router, prefix="/api", tags=["Ticket"])
@@ -248,7 +253,30 @@ def player_joined(req: EncryptedRequest, db: Session = Depends(get_db)):
     return {"success": False}
 # --- 发送验证码接口 ---
 @app.post("/api/send-code")
-def api_send_code(req: EncryptedRequest):
+def api_send_code(req: EncryptedRequest, request: Request):
+    # 1. IP Check
+    client_ip = request.client.host
+    if client_ip in blocked_ips:
+        raise HTTPException(status_code=403, detail="Your IP is blocked due to excessive requests")
+
+    now = time.time()
+    # Initialize history for IP
+    if client_ip not in ip_request_history:
+        ip_request_history[client_ip] = []
+    
+    # Clean up old history (> 1 hour)
+    one_hour_ago = now - 3600
+    ip_request_history[client_ip] = [t for t in ip_request_history[client_ip] if t > one_hour_ago]
+    
+    # Check rate limit (10 per hour)
+    if len(ip_request_history[client_ip]) >= 10:
+        blocked_ips.add(client_ip)
+        print(f"[RateLimit] Blocking IP {client_ip} for excessive requests")
+        raise HTTPException(status_code=403, detail="Your IP is blocked due to excessive requests")
+
+    # Record current request
+    ip_request_history[client_ip].append(now)
+
     payload = decrypt_data(req.data)
     if not payload:
         raise HTTPException(status_code=400, detail="非法请求")
@@ -347,8 +375,40 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
         "success": True,
         "message": "登录成功",
         "token": token,
-        "userInfo": user_info
+        "userInfo": encrypt_data(user_info)
     }
+
+
+# ================= 辅助函数：同步封禁状态 =================
+def sync_ban_to_fivem(license_str: str, is_banned: bool, reason: str = ""):
+    """
+    调用 FiveM 接口 /api/ban-player 同步封禁状态
+    """
+    # url = f"{FIVEM_SERVER_BASE}/api/ban-player"
+    headers = {
+        "Authorization": FIVEM_API_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "license": license_str,
+        "is_banned": is_banned
+    }
+    if is_banned and reason:
+        payload["ban_reason"] = reason
+        
+    try:
+        print(f"[SyncBan] Request to {FIVEM_BAN_API_URL} with {payload}")
+        resp = requests.post(FIVEM_BAN_API_URL, json=payload, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            print(f"[SyncBan] Success for {license_str}: {resp.json()}")
+            return True
+        else:
+            print(f"[SyncBan] Failed for {license_str}: {resp.status_code} {resp.text}")
+            return False
+    except Exception as e:
+        print(f"[SyncBan] Exception for {license_str}: {e}")
+        return False
 
 
 # ================= 辅助函数：检查 FiveM 服务器状态 =================
@@ -525,8 +585,9 @@ def get_user_assets(request: Request, db: Session = Depends(get_db)):
                         print(f"[Sync] Success for {user.phone}")
                         
                         # 直接返回远程数据
-                        # return {"success": True, "data": encrypt_data(r_data)}
-                        return {"success": True, "data": r_data}
+                        #todo
+                        return {"success": True, "data": encrypt_data(r_data)}
+                        # return {"success": True, "data": r_data}
 
                 print(f"FiveM API Sync Failed: {resp.text}")
                 
@@ -789,24 +850,67 @@ def get_current_super_admin(request: Request, db: Session = Depends(get_db)):
 @app.get("/api/admin/stats")
 def admin_get_stats(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
     try:
+        # 1. Total Counts
         total_users = db.query(models.User).count()
-        # total_sales: 暂时mock，或者统计UserInventory消耗？还没交易记录表，暂且mock
-        total_sales = 0
+        product_count = db.query(models.Product).count()
+        banned_count = db.query(models.User).filter(models.User.status == "banned").count()
         
-        # Check online count
+        # 2. Total Sales (Completed Orders)
+        total_sales_q = db.query(func.sum(models.Order.total_amount)).filter(models.Order.status == "completed").scalar()
+        total_sales = float(total_sales_q or 0) / 100.0
+
+        # 3. Online Count (Remote)
         status = check_fivem_server_status()
         online_count = status.get("playerCount", 0)
         
-        # active_today: 简单以updated_at为今天的用户? 暂且mock
-        active_today = 0
+        # 4. Trend Data (Last 30 days)
+        trend_data = []
+        today = datetime.datetime.now().date()
+        for i in range(29, -1, -1):
+            day = today - timedelta(days=i)
+            day_str = day.strftime("%m/%d")
+            
+            # Start/End of that day
+            start_dt = datetime.datetime.combine(day, datetime.time.min)
+            end_dt = datetime.datetime.combine(day, datetime.time.max)
+            
+            # Daily New Users
+            new_users = db.query(models.User).filter(
+                models.User.created_at >= start_dt,
+                models.User.created_at <= end_dt
+            ).count()
+            
+            # Daily Sales
+            daily_sales_q = db.query(func.sum(models.Order.total_amount)).filter(
+                models.Order.status == "completed",
+                models.Order.created_at >= start_dt,
+                models.Order.created_at <= end_dt
+            ).scalar()
+            daily_sales = float(daily_sales_q or 0) / 100.0
+            
+            # Daily Banned (Approximation using updated_at)
+            daily_banned = db.query(models.User).filter(
+                models.User.status == "banned",
+                models.User.updated_at >= start_dt,
+                models.User.updated_at <= end_dt
+            ).count()
+            
+            trend_data.append({
+                "date": day_str,
+                "users": new_users,
+                "sales": daily_sales,
+                "banned": daily_banned
+            })
         
         return {
             "success": True,
             "data": {
                 "totalUsers": total_users,
-                "activeToday": active_today,
                 "totalSales": total_sales,
-                "onlineCount": online_count
+                "productCount": product_count,
+                "bannedCount": banned_count,
+                "onlineCount": online_count,
+                "trendData": trend_data
             }
         }
     except Exception as e:
@@ -1018,6 +1122,11 @@ def admin_ban_user(user_id: int, admin: models.User = Depends(get_current_admin)
     if user:
         user.status = "banned"
         db.commit()
+        
+        # Sync to FiveM
+        if user.license:
+            sync_ban_to_fivem(user.license, True, "Admin Ban")
+            
     return {"success": True}
 
 @app.post("/api/admin/users/{user_id}/unban")
@@ -1026,5 +1135,10 @@ def admin_unban_user(user_id: int, admin: models.User = Depends(get_current_admi
     if user:
         user.status = "active"
         db.commit()
+        
+        # Sync to FiveM
+        if user.license:
+            sync_ban_to_fivem(user.license, False)
+            
     return {"success": True}
 # 启动命令: uvicorn main:app --reload

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 import models
+import datetime
 from database import get_db
 from dependencies import get_current_user, get_current_admin
 
@@ -114,12 +115,33 @@ def admin_get_tickets(admin: models.User = Depends(get_current_admin), db: Sessi
     data = []
     for t in tickets:
         user = db.query(models.User).filter(models.User.id == t.user_id).first()
-        nickname = user.nickname if user else "Unknown"
+        if user:
+             nickname = user.nickname
+             phone = user.phone
+        else:
+             nickname = "Unknown"
+             phone = ""
+             
+        # Get Active Subscription for this user
+        sub_name = "None"
+        if user:
+            active_sub = db.query(models.UserSubscription).join(models.SubscriptionPlan).filter(
+                models.UserSubscription.user_id == user.id,
+                models.UserSubscription.status == "active",
+                models.UserSubscription.end_date > datetime.datetime.now()
+            ).order_by(models.UserSubscription.end_date.desc()).first()
+            
+            if active_sub:
+                 plan = db.query(models.SubscriptionPlan).filter(models.SubscriptionPlan.id == active_sub.plan_id).first()
+                 if plan:
+                    sub_name = plan.name
         
         data.append({
             "id": t.id,
             "title": t.title,
             "userNickname": nickname,
+            "userPhone": phone,
+            "userSubscription": sub_name,
             "status": t.status,
             "type": t.type,
             "createdAt": t.created_at.strftime("%Y-%m-%d")
