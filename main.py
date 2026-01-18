@@ -20,34 +20,11 @@ from sqlalchemy import or_, func
 from database import get_db, engine
 import models
 from routers import subscription, ticket, store, payment
+import config
 # ================= 配置区域 =================
+# Moved to config.py
+# SPUG_SMS_URL, AES_*, JWT_*, FIVEM_*, ALIPAY_* are now in config module.
 
-# Spug 推送助手 URL (请替换为你自己的真实 URL)
-# 类似于: https://push.spug.cc/sms/A27Lsf3fs2bgEY
-SPUG_SMS_URL = "https://push.spug.cc/sms/3RtZpmNURwKzVgQRbzpd6w"
-
-# 加密配置 (必须与前端一致)
-AES_SECRET_KEY = b"12345678901234567890123456789012"
-AES_IV = b"1234567890123456"
-
-# JWT 配置
-JWT_SECRET = "your-jwt-secret-key"
-JWT_ALGORITHM = "HS256"
-
-# FiveM API Configuration
-FIVEM_SERVER_BASE = "http://192.168.50.77:30120"
-FIVEM_API_URL = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/get-player-info"
-FIVEM_BAN_API_URL = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/ban-player"
-FIVEM_API_TOKEN = "sk_your_secure_password_123456"
-
-# Alipay Configuration
-ALIPAY_APPID = "your_alipay_appid"
-ALIPAY_DEBUG = True # True for Sandbox
-# keys usually read from files, but for config we can restart or just point to paths
-ALIPAY_PRIVATE_KEY_PATH = "keys/app_private_key.pem"
-ALIPAY_PUBLIC_KEY_PATH = "keys/alipay_public_key.pem"
-ALIPAY_NOTIFY_URL = "http://your-domain.com/api/payment/alipay/notify"
-ALIPAY_RETURN_URL = "http://your-domain.com/payment/result"
 
 # 模拟数据库
 verification_codes_db = {}
@@ -86,7 +63,7 @@ def get_client_ip(request: Request):
 def decrypt_data(encrypted_text: str):
     try:
         enc = base64.b64decode(encrypted_text)
-        cipher = AES.new(AES_SECRET_KEY, AES.MODE_CBC, AES_IV)
+        cipher = AES.new(config.AES_SECRET_KEY, AES.MODE_CBC, config.AES_IV)
         decrypted_bytes = unpad(cipher.decrypt(enc), AES.block_size)
         return json.loads(decrypted_bytes.decode('utf-8'))
     except Exception as e:
@@ -98,7 +75,7 @@ def decrypt_data(encrypted_text: str):
 def encrypt_data(data: dict):
     try:
         json_str = json.dumps(data)
-        cipher = AES.new(AES_SECRET_KEY, AES.MODE_CBC, AES_IV)
+        cipher = AES.new(config.AES_SECRET_KEY, AES.MODE_CBC, config.AES_IV)
         ct_bytes = cipher.encrypt(pad(json_str.encode('utf-8'), AES.block_size))
         return base64.b64encode(ct_bytes).decode('utf-8')
     except Exception as e:
@@ -120,7 +97,7 @@ def send_spug_sms(phone: str, code: str):
         }
 
         # 发送 POST 请求
-        response = requests.post(SPUG_SMS_URL, json=body, timeout=5)
+        response = requests.post(config.SPUG_SMS_URL, json=body, timeout=5)
 
         # 打印响应以便调试
         print(f"Spug响应: {response.text}")
@@ -366,7 +343,7 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
         "status": user.status,
     }
     # 生成 JWT
-    token = jwt.encode(user_info, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    token = jwt.encode(user_info, config.JWT_SECRET, algorithm=config.JWT_ALGORITHM)
 
     # 6. 登录成功后，清除验证码
     del verification_codes_db[phone]
@@ -386,7 +363,7 @@ def sync_ban_to_fivem(license_str: str, is_banned: bool, reason: str = ""):
     """
     # url = f"{FIVEM_SERVER_BASE}/api/ban-player"
     headers = {
-        "Authorization": FIVEM_API_TOKEN,
+        "Authorization": config.FIVEM_API_TOKEN,
         "Content-Type": "application/json"
     }
     
@@ -398,8 +375,8 @@ def sync_ban_to_fivem(license_str: str, is_banned: bool, reason: str = ""):
         payload["ban_reason"] = reason
         
     try:
-        print(f"[SyncBan] Request to {FIVEM_BAN_API_URL} with {payload}")
-        resp = requests.post(FIVEM_BAN_API_URL, json=payload, headers=headers, timeout=5)
+        print(f"[SyncBan] Request to {config.FIVEM_BAN_API_URL} with {payload}")
+        resp = requests.post(config.FIVEM_BAN_API_URL, json=payload, headers=headers, timeout=5)
         if resp.status_code == 200:
             print(f"[SyncBan] Success for {license_str}: {resp.json()}")
             return True
@@ -416,8 +393,8 @@ def check_fivem_server_status():
     """
     仿照前端逻辑检查服务器状态
     """
-    info_url = f"{FIVEM_SERVER_BASE}/info.json"
-    players_url = f"{FIVEM_SERVER_BASE}/players.json"
+    info_url = f"{config.FIVEM_SERVER_BASE}/info.json"
+    players_url = f"{config.FIVEM_SERVER_BASE}/players.json"
     
     try:
         # 1. 请求 info.json (超时 2 秒)
@@ -527,9 +504,9 @@ def get_user_assets(request: Request, db: Session = Depends(get_db)):
             # === 1. 在线 -> 调用 FiveM API 获取最新数据 ===
             try:
                 print(f"[Sync] Fetching data for {user.phone} ({user.license})...")
-                headers = {"Content-Type": "application/json", "Authorization": FIVEM_API_TOKEN}
+                headers = {"Content-Type": "application/json", "Authorization": config.FIVEM_API_TOKEN}
                 body = {"license": user.license}
-                resp = requests.post(FIVEM_API_URL, json=body, headers=headers, timeout=5)
+                resp = requests.post(config.FIVEM_API_URL, json=body, headers=headers, timeout=5)
                 
                 if resp.status_code == 200:
                     remote_data = resp.json()
@@ -820,7 +797,7 @@ def get_current_admin(request: Request, db: Session = Depends(get_db)):
     token = auth_header.split(" ")[1]
     
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, config.JWT_SECRET, algorithms=[config.JWT_ALGORITHM])
         user_id = payload.get("userId")
         user = db.query(models.User).filter(models.User.id == user_id).first()
         if not user or (not user.is_super_admin and not user.is_admin):
@@ -836,7 +813,7 @@ def get_current_super_admin(request: Request, db: Session = Depends(get_db)):
     token = auth_header.split(" ")[1]
     
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, config.JWT_SECRET, algorithms=[config.JWT_ALGORITHM])
         user_id = payload.get("userId")
         user = db.query(models.User).filter(models.User.id == user_id).first()
         if not user or not user.is_super_admin:

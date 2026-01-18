@@ -9,6 +9,7 @@ import datetime
 
 import os
 import ssl
+import config
 
 # MacOS SSL Fix for Dev/Sandbox
 if os.environ.get("ALIPAY_DEBUG", "True") == "True":
@@ -25,15 +26,7 @@ except ImportError:
 
 router = APIRouter()
 
-# Configuration (Ideally this comes from config file/env)
-# Using hardcoded paths as placeholders for now, assuming user will replace or I will guide them
-ALIPAY_APPID = "9021000159612723"
-ALIPAY_DEBUG = True
-# Resolve paths relative to this file (routers/payment.py) -> routers/keys/
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-APP_PRIVATE_KEY_PATH = os.path.join(BASE_DIR, "keys", "app-privare-key.txt")
-# Switching to Public Key Mode: User needs "Alipay Public Key" (not Cert)
-ALIPAY_PUBLIC_KEY_PATH = os.path.join(BASE_DIR, "keys", "alipay_public_key.txt")
+# Configuration (from config.py)
 
 def get_alipay_client():
     if not AliPay:
@@ -57,14 +50,15 @@ def get_alipay_client():
     # If you have CSR, you likely have "Certificate Mode" enabled.
     # You MUST have the Private Key (often named app_private_key.pem or .txt). CSR is NOT a key.
     
-    with open(APP_PRIVATE_KEY_PATH) as f:
+    
+    with open(config.ALIPAY_PRIVATE_KEY_PATH) as f:
         app_private_key_string = f.read()
         # Ensure Private Key has headers
         if "-----BEGIN" not in app_private_key_string:
             app_private_key_string = f"-----BEGIN RSA PRIVATE KEY-----\n{app_private_key_string}\n-----END RSA PRIVATE KEY-----"
         
     # If using Public Key Mode (Standard for Sandbox):
-    with open(ALIPAY_PUBLIC_KEY_PATH) as f:
+    with open(config.ALIPAY_PUBLIC_KEY_PATH) as f:
         alipay_public_key_string = f.read()
         # Ensure Public Key has headers
         if "-----BEGIN" not in alipay_public_key_string:
@@ -73,12 +67,12 @@ def get_alipay_client():
     # print(app_private_key_string)
     # print(alipay_public_key_string)
     alipay = AliPay(
-        appid=ALIPAY_APPID,
+        appid=config.ALIPAY_APPID,
         app_notify_url=None,
         app_private_key_string=app_private_key_string,
         alipay_public_key_string=alipay_public_key_string,
         sign_type="RSA2",
-        debug=ALIPAY_DEBUG
+        debug=config.ALIPAY_DEBUG
     )
     
     # --- IF YOU WANT TO USE CERT MODE (CSR Workflow), UNCOMMENT BELOW AND COMMENT ABOVE ---
@@ -191,7 +185,7 @@ def create_alipay_payment(data: dict = Body(...), user: models.User = Depends(ge
             out_trade_no=order_id,
             total_amount=amount_str,
             return_url="http://localhost:3000/", # Frontend return page (Synchronous)
-            notify_url="https://6696819b56da.ngrok-free.app/api/payment/alipay/notify" # Asynchronous Callback (MUST BE PUBLIC)
+            notify_url=config.ALIPAY_NOTIFY_URL # Asynchronous Callback
         )
         
         gateway = "https://openapi-sandbox.dl.alipaydev.com/gateway.do" if ALIPAY_DEBUG else "https://openapi.alipay.com/gateway.do"
@@ -298,18 +292,15 @@ def give_vehicle_to_fivem(license, vehicle, garage):
     """
     # url = "http://192.168.50.77:30120/api/give-vehicle"
     # Or use FIVEM_SERVER_BASE if we import
-    FIVEM_SERVER_BASE = "http://192.168.50.77:30120"
-    url = f"{FIVEM_SERVER_BASE}/qb-qrlogin/api/give-vehicle"
+
+    url = config.FIVEM_GIVE_VEHICLE_URL
     payload = {
         "license": license,
         "vehicle": vehicle,
-        "garage": garage or "pillboxgarage" # Default garage if None
+        "garage": garage or "pillboxgarage"
     }
     
-    # We need a token. Using the same one from main.py if possible.
-    # Hardcoding valid token for now as per previous instructions or environment variable.
-    # Ideally should be consistent.
-    token = "sk_your_secure_password_123456" 
+    token = config.FIVEM_API_TOKEN 
     
     try:
         print(f"[VehicleDelivery] Sending {vehicle} to {license}")
