@@ -1,8 +1,31 @@
-# models.py
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, BigInteger, DateTime, JSON
+
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, BigInteger, DateTime, JSON, Float
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
+
+class VerificationCode(Base):
+    __tablename__ = "verification_codes"
+
+    phone = Column(String(20), primary_key=True, index=True)
+    code = Column(String(10), nullable=False)
+    expire_at = Column(Float, nullable=False)  # Using timestamp
+
+class IPAuth(Base):
+    __tablename__ = "ip_auths"
+
+    ip = Column(String(50), primary_key=True, index=True)
+    user_info = Column(JSON, nullable=False)
+    expire_at = Column(Float, nullable=False)
+
+class ManualBindCode(Base):
+    __tablename__ = "manual_bind_codes"
+    
+    code = Column(String(10), primary_key=True, index=True)
+    user_id = Column(BigInteger, nullable=False)
+    user_info = Column(JSON, nullable=True)
+    expire_at = Column(Float, nullable=False)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -70,6 +93,7 @@ class Product(Base):
     image_url = Column(String(255))
     stock = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -116,6 +140,7 @@ class SubscriptionPlan(Base):
     duration = Column(Integer, default=30) # days
     description = Column(String(255))
     is_active = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

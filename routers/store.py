@@ -11,7 +11,10 @@ router = APIRouter()
 @router.get("/store/products")
 def get_store_products(db: Session = Depends(get_db)):
     # Get active products
-    products = db.query(models.Product).filter(models.Product.is_active == True).order_by(models.Product.id.desc()).all()
+    products = db.query(models.Product).filter(
+        models.Product.is_active == True,
+        models.Product.is_deleted == False
+    ).order_by(models.Product.id.desc()).all()
     data = []
     for p in products:
         data.append({
@@ -62,11 +65,31 @@ def get_pending_vehicles(data: dict = Body(...), db: Session = Depends(get_db)):
                      
     return {"success": True, "data": pending_list}
 
+@router.post("/store/vehicle-delivered")
+def vehicle_delivered(data: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Callback to mark an order as delivered
+    """
+    order_id = data.get("order_id")
+    if not order_id:
+        return {"success": False, "message": "Order ID required"}
+        
+    # Check if order exists
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        return {"success": False, "message": "Order not found"}
+        
+    # Update status
+    order.is_delivered = True
+    db.commit()
+    
+    return {"success": True, "message": "Order updated"}
+
 # --- Admin Product APIs ---
 
 @router.get("/admin/store/products")
 def admin_get_products(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    products = db.query(models.Product).all()
+    products = db.query(models.Product).filter(models.Product.is_deleted == False).all()
     data = []
     for p in products:
         data.append({
@@ -128,7 +151,8 @@ def admin_update_product(product_id: int, data: dict = Body(...), admin: models.
 def admin_delete_product(product_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if product:
-        db.delete(product)
+        product.is_deleted = True
+        product.is_active = False
         db.commit()
     return {"success": True}
 

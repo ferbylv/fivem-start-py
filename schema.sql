@@ -135,6 +135,7 @@ CREATE TABLE `products` (
   `image_url` varchar(255) DEFAULT NULL,
   `stock` int(11) DEFAULT 0,
   `is_active` tinyint(1) DEFAULT 1,
+  `is_deleted` tinyint(1) DEFAULT 0,
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -251,3 +252,22 @@ CREATE TABLE `order_items` (
   CONSTRAINT `order_items_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`),
   CONSTRAINT `order_items_ibfk_3` FOREIGN KEY (`plan_id`) REFERENCES `subscription_plans` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS verification_codes (
+    phone VARCHAR(20) PRIMARY KEY,
+    code VARCHAR(10) NOT NULL,
+    expire_at FLOAT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ip_auths (
+    ip VARCHAR(50) PRIMARY KEY,
+    user_info JSON NOT NULL,
+    expire_at FLOAT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS manual_bind_codes (
+    code VARCHAR(10) PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    user_info JSON,
+    expire_at FLOAT NOT NULL
+);

@@ -3,9 +3,9 @@ from sqlalchemy.orm import Session
 import jwt
 import models
 from database import get_db
-
-JWT_SECRET = "your-jwt-secret-key"
-JWT_ALGORITHM = "HS256"
+import config
+# JWT_SECRET = "your-jwt-secret-key"
+# JWT_ALGORITHM = "HS256"
 
 def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -13,7 +13,7 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
     
     token = authorization.split(" ")[1]
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, config.JWT_SECRET, algorithms=[config.JWT_ALGORITHM])
         user_id = payload.get("userId")
         if not user_id:
              raise HTTPException(status_code=401, detail="无效Token")

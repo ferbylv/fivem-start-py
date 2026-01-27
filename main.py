@@ -3,9 +3,11 @@ import json
 import time
 import random
 import base64
+import logging
+import sys
 import requests  # 1. 引入 requests 库
 from fastapi import Request
-from fastapi import FastAPI, HTTPException,Body,Depends
+from fastapi import FastAPI, HTTPException,Body,Depends,Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from Crypto.Cipher import AES
@@ -16,20 +18,28 @@ from datetime import timedelta
 from typing import Optional
 # --- 数据库相关引入 ---
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, true
+from sqlalchemy.sql.functions import user
+
 from database import get_db, engine
 import models
-from routers import subscription, ticket, store, payment
+from routers import subscription, ticket, store, payment, auth
 import config
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger("app")
 # ================= 配置区域 =================
 # Moved to config.py
 # SPUG_SMS_URL, AES_*, JWT_*, FIVEM_*, ALIPAY_* are now in config module.
 
 
 # 模拟数据库
-verification_codes_db = {}
-ip_auth_db = {}
-manual_bind_db = {}
+
 # IP Ratings
 ip_request_history = {} # IP -> [timestamp1, timestamp2, ...]
 blocked_ips = set() # {ip1, ip2}
@@ -38,13 +48,14 @@ app.include_router(subscription.router, prefix="/api", tags=["Subscription"])
 app.include_router(ticket.router, prefix="/api", tags=["Ticket"])
 app.include_router(store.router, prefix="/api", tags=["Store"])
 app.include_router(payment.router, prefix="/api", tags=["Payment"])
-verification_codes_db["15143933787"] = {
-            "code": "123456",
-            # -------------------------------------------------
-            # ★★★ 修改点：将 60 改为 300 ★★★
-            # -------------------------------------------------
-            "expire_at": time.time() + 300
-        }
+app.include_router(auth.router, prefix="/api", tags=["Auth"])
+# verification_codes_db["15143933787"] = {
+#             "code": "123456",
+#             # -------------------------------------------------
+#             # ★★★ 修改点：将 60 改为 300 ★★★
+#             # -------------------------------------------------
+#             "expire_at": time.time() + 300
+#         }
 # CORS 配置
 app.add_middleware(
     CORSMiddleware,
@@ -67,7 +78,7 @@ def decrypt_data(encrypted_text: str):
         decrypted_bytes = unpad(cipher.decrypt(enc), AES.block_size)
         return json.loads(decrypted_bytes.decode('utf-8'))
     except Exception as e:
-        print(f"解密失败: {e}")
+        logger.info(f"解密失败: {e}")
         return None
 
 
@@ -79,7 +90,7 @@ def encrypt_data(data: dict):
         ct_bytes = cipher.encrypt(pad(json_str.encode('utf-8'), AES.block_size))
         return base64.b64encode(ct_bytes).decode('utf-8')
     except Exception as e:
-        print(f"加密失败: {e}")
+        logger.info(f"加密失败: {e}")
         return None
 
 
@@ -100,17 +111,17 @@ def send_spug_sms(phone: str, code: str):
         response = requests.post(config.SPUG_SMS_URL, json=body, timeout=5)
 
         # 打印响应以便调试
-        print(f"Spug响应: {response.text}")
+        logger.info(f"Spug响应: {response.text}")
 
         # Spug 如果成功通常返回 HTTP 200
         if response.status_code == 200:
             return True
         else:
-            print(f"短信发送失败: HTTP {response.status_code}")
+            logger.info(f"短信发送失败: HTTP {response.status_code}")
             return False
 
     except Exception as e:
-        print(f"请求异常: {e}")
+        logger.info(f"请求异常: {e}")
         return False
 
 
@@ -133,7 +144,7 @@ def game_pre_auth(request: Request, req: EncryptedRequest,db: Session = Depends(
 
     # 2. 获取用户 IP
     client_ip = get_client_ip(request)
-    print(f"Web端预授权 -> 用户:{phone}, IP:{client_ip}")
+    logger.info(f"Web端预授权 -> 用户:{phone}, IP:{client_ip}")
     # 查数据库获取最新用户信息
     user = db.query(models.User).filter(models.User.phone == phone).first()
     if not user: return {"success": False, "message": "用户不存在"}
@@ -145,11 +156,16 @@ def game_pre_auth(request: Request, req: EncryptedRequest,db: Session = Depends(
         # 可以把数据库里的车牌号也传过去，方便游戏内发放钥匙
     }
 
-    # 3. ★★★ 存入内存字典 (有效期 5 分钟) ★★★
-    ip_auth_db[client_ip] = {
-        "user_info": auth_data,  # 存储完整的用户信息
-        "expire_at": time.time() + 300  # 5分钟后过期
-    }
+    # 3. ★★★ 存入数据库 (有效期 5 分钟) ★★★
+    # Check if exists
+    ip_record = db.query(models.IPAuth).filter(models.IPAuth.ip == client_ip).first()
+    if not ip_record:
+        ip_record = models.IPAuth(ip=client_ip)
+        db.add(ip_record)
+    
+    ip_record.user_info = auth_data
+    ip_record.expire_at = int(time.time() + 300)
+    db.commit()
 
     return {"success": True, "message": "预授权成功"}
 # 1. 修改请求模型，增加 license 字段
@@ -167,18 +183,19 @@ def fivem_check_ip(req: FiveMCheckRequest, db: Session = Depends(get_db)):
     client_ip = req.ip
     user_license = req.license
     
-    print(f"Web<UNK> -> <UNK>:{client_ip}")
-    # 1. 在字典里查找这个 IP
-    record = ip_auth_db.get(client_ip)
-
+    logger.info(f"Web<UNK> -> <UNK>:{client_ip}")
+    # 1. 在数据库里查找这个 IP
+    record = db.query(models.IPAuth).filter(models.IPAuth.ip == client_ip).first()
+    
     # 2. 判断是否存在 且 未过期
-    if record and time.time() < record["expire_at"]:
+    if record and time.time() < record.expire_at:
         # === 匹配成功 ===
-        print(f"FiveM匹配成功 -> IP:{client_ip}")
+        logger.info(f"FiveM匹配成功 -> IP:{client_ip}")
         if user_license:
             try:
                 # 从缓存记录中获取用户 ID
-                user_id = record["user_info"].get("userId")
+                # JSON field automatically deserialized
+                user_id = record.user_info.get("userId")
 
                 # 查询数据库
                 user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -187,16 +204,20 @@ def fivem_check_ip(req: FiveMCheckRequest, db: Session = Depends(get_db)):
                     user.license = user_license
                     user.is_bound = True
                     db.commit()  # 提交保存
-                    print(f"自动绑定成功 -> 用户:{user.nickname}, License:{user_license}")
-                    del ip_auth_db[client_ip]
+                    logger.info(f"自动绑定成功 -> 用户:{user.nickname}, License:{user_license}")
+                    
+                    # Delete auth record
+                    db.delete(record)
+                    db.commit()
             except Exception as e:
-                print(f"自动绑定更新失败: {e}")
-        return {"success": True, "data": record["user_info"]}
+                logger.info(f"自动绑定更新失败: {e}")
+        return {"success": True, "data": record.user_info}
     else:
         # === 匹配失败 (不存在 或 已过期) ===
         # 如果过期了，顺手清理一下内存 (可选)
         if record:
-            del ip_auth_db[client_ip]
+            db.delete(record)
+            db.commit()
 
         # 生成一个随机 4 位验证码 (用于 fallback 卡片展示)
         # random_code = str(random.randint(1000, 9999))
@@ -224,13 +245,13 @@ def player_joined(req: EncryptedRequest, db: Session = Depends(get_db)):
             user.is_bound = True  # 标记为已绑定
             user.license = fivem_license
             db.commit()
-            print(f"用户 {user.nickname} 已绑定 FiveM")
+            logger.info(f"用户 {user.nickname} 已绑定 FiveM")
             return {"success": True}
 
     return {"success": False}
 # --- 发送验证码接口 ---
 @app.post("/api/send-code")
-def api_send_code(req: EncryptedRequest, request: Request):
+def api_send_code(req: EncryptedRequest, request: Request, db: Session = Depends(get_db)):
     # 1. IP Check
     client_ip = request.client.host
     if client_ip in blocked_ips:
@@ -248,7 +269,7 @@ def api_send_code(req: EncryptedRequest, request: Request):
     # Check rate limit (10 per hour)
     if len(ip_request_history[client_ip]) >= 10:
         blocked_ips.add(client_ip)
-        print(f"[RateLimit] Blocking IP {client_ip} for excessive requests")
+        logger.info(f"[RateLimit] Blocking IP {client_ip} for excessive requests")
         raise HTTPException(status_code=403, detail="Your IP is blocked due to excessive requests")
 
     # Record current request
@@ -264,21 +285,24 @@ def api_send_code(req: EncryptedRequest, request: Request):
 
     # 生成 6 位随机验证码
     code = str(random.randint(100000, 999999))
-
+    success=true
     # === 调用 Spug 发送 ===
-    success = send_spug_sms(phone, code)
+    # success = send_spug_sms(phone, code)
 
-    print(f"尝试发送短信 -> 手机: {phone}, 验证码: {code}, 结果: {success}")
-
+    logger.info(f"尝试发送短信 -> 手机: {phone}, 验证码: {code}, 结果: {success}")
+    logger.info(f"尝试发送短信 -> 手机: {phone}, 验证码: {code}, 结果: {success}")
+    
     if success:
-        # 存入内存 (有效期改为 5 分钟 = 300 秒)
-        verification_codes_db[phone] = {
-            "code": code,
-            # -------------------------------------------------
-            # ★★★ 修改点：将 60 改为 300 ★★★
-            # -------------------------------------------------
-            "expire_at": time.time() + 300
-        }
+        # Save to DB
+        db_code = db.query(models.VerificationCode).filter(models.VerificationCode.phone == phone).first()
+        if not db_code:
+            db_code = models.VerificationCode(phone=phone)
+            db.add(db_code)
+
+        db_code.code = code
+        db_code.expire_at = int(time.time() + 300)
+        db.commit()
+        
         return {"success": True, "message": "验证码已发送"}
     else:
         # 如果是测试阶段，发送失败也可以暂时返回 True 让流程走下去，这里视你的需求而定
@@ -295,15 +319,19 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
 
     phone = payload.get("phone")
     user_code = payload.get("code")
-
-    # 2. 校验验证码 (先检查内存/Redis中的验证码是否正确)
-    record = verification_codes_db.get(phone)
+    logger.info(f"用户登录尝试: {phone}")
+    # 2. 校验验证码 (Query DB)
+    record = db.query(models.VerificationCode).filter(models.VerificationCode.phone == phone).first()
+    
     if not record:
         return {"success": False, "message": "请先获取验证码"}
-    if time.time() > record["expire_at"]:
-        del verification_codes_db[phone]
+
+    if time.time() > record.expire_at:
+        db.delete(record)
+        db.commit()
         return {"success": False, "message": "验证码已过期"}
-    if record["code"] != user_code:
+        
+    if record.code != user_code:
         return {"success": False, "message": "验证码错误"}
 
     # ============================================================
@@ -316,7 +344,7 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
     # 4. 判断结果
     if not user:
         # --- 情况 A: 用户不存在 -> 执行注册新增 ---
-        print(f"新用户注册: {phone}")
+        logger.info(f"新用户注册: {phone}")
         new_user = models.User(
             phone=phone,
             nickname=f"用户{phone[-4:]}",  # 默认昵称：用户8888
@@ -331,7 +359,7 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
         user = new_user  # 将新用户赋值给 user 变量，方便后面统一处理
     else:
         # --- 情况 B: 用户已存在 -> 直接使用 ---
-        print(f"老用户登录: {user.nickname}")
+        logger.info(f"老用户登录: {user.nickname}")
 
     # 5. 生成 Token (使用数据库里的真实 ID 和信息)
     user_info = {
@@ -340,13 +368,16 @@ def api_login(req: EncryptedRequest, db: Session = Depends(get_db)):
         "nickname": user.nickname,
         "isBound": user.is_bound,
         "isAdmin": user.is_admin,
+        "isSuperAdmin": user.is_super_admin,
         "status": user.status,
     }
     # 生成 JWT
     token = jwt.encode(user_info, config.JWT_SECRET, algorithm=config.JWT_ALGORITHM)
 
     # 6. 登录成功后，清除验证码
-    del verification_codes_db[phone]
+    if record:
+        db.delete(record)
+        db.commit()
 
     return {
         "success": True,
@@ -375,16 +406,16 @@ def sync_ban_to_fivem(license_str: str, is_banned: bool, reason: str = ""):
         payload["ban_reason"] = reason
         
     try:
-        print(f"[SyncBan] Request to {config.FIVEM_BAN_API_URL} with {payload}")
+        logger.info(f"[SyncBan] Request to {config.FIVEM_BAN_API_URL} with {payload}")
         resp = requests.post(config.FIVEM_BAN_API_URL, json=payload, headers=headers, timeout=5)
         if resp.status_code == 200:
-            print(f"[SyncBan] Success for {license_str}: {resp.json()}")
+            logger.info(f"[SyncBan] Success for {license_str}: {resp.json()}")
             return True
         else:
-            print(f"[SyncBan] Failed for {license_str}: {resp.status_code} {resp.text}")
+            logger.info(f"[SyncBan] Failed for {license_str}: {resp.status_code} {resp.text}")
             return False
     except Exception as e:
-        print(f"[SyncBan] Exception for {license_str}: {e}")
+        logger.info(f"[SyncBan] Exception for {license_str}: {e}")
         return False
 
 
@@ -434,7 +465,7 @@ def get_server_status(request: Request, db: Session = Depends(get_db)):
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ")[1]
         try:
-            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            payload = jwt.decode(token, config.JWT_SECRET, algorithms=[config.JWT_ALGORITHM])
             user_id = payload.get("userId")
             user = db.query(models.User).filter(models.User.id == user_id).first()
             
@@ -451,7 +482,7 @@ def get_server_status(request: Request, db: Session = Depends(get_db)):
             # If token is bad, we can't judge status, so maybe just proceed or return 401.
             # For "Server Status" page (often public), we usually allow access but check ban if logged in.
             # But the requirement specifically says "use token to judge status".
-            print(f"Status check auth error: {e}")
+            logger.info(f"Status check auth error: {e}")
             pass
 
     return check_fivem_server_status()
@@ -483,9 +514,9 @@ def get_user_assets(request: Request, db: Session = Depends(get_db)):
     
     try:
         # 解码 Token 获取 UserID
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, config.JWT_SECRET, algorithms=[config.JWT_ALGORITHM])
         user_id = payload.get("userId")
-        print(payload)
+        logger.info(payload)
         # 查询用户基础资产
         user = db.query(models.User).filter(models.User.id == user_id).first()
         if not user: raise HTTPException(status_code=404, detail="User not found")
@@ -503,7 +534,7 @@ def get_user_assets(request: Request, db: Session = Depends(get_db)):
         if need_sync:
             # === 1. 在线 -> 调用 FiveM API 获取最新数据 ===
             try:
-                print(f"[Sync] Fetching data for {user.phone} ({user.license})...")
+                logger.info(f"[Sync] Fetching data for {user.phone} ({user.license})...")
                 headers = {"Content-Type": "application/json", "Authorization": config.FIVEM_API_TOKEN}
                 body = {"license": user.license}
                 resp = requests.post(config.FIVEM_API_URL, json=body, headers=headers, timeout=5)
@@ -559,21 +590,21 @@ def get_user_assets(request: Request, db: Session = Depends(get_db)):
                             db.add_all(new_inventory)
                         
                         db.commit() 
-                        print(f"[Sync] Success for {user.phone}")
-                        
+                        logger.info(f"[Sync] Success for {user.phone}")
+                        logger.info(f"asset:{r_data}")
                         # 直接返回远程数据
                         #todo
                         return {"success": True, "data": encrypt_data(r_data)}
                         # return {"success": True, "data": r_data}
 
-                print(f"FiveM API Sync Failed: {resp.text}")
+                logger.info(f"FiveM API Sync Failed: {resp.text}")
                 
             except Exception as e:
-                print(f"FiveM API Sync Error: {e}")
+                logger.info(f"FiveM API Sync Error: {e}")
                 db.rollback()
 
         # === Fallback: 离线 或 同步失败 -> 返回本地数据库数据 ===
-        print(f"[Fallback] Returning local data for {user.phone}")
+        logger.info(f"[Fallback] Returning local data for {user.phone}")
         
         # 查询车辆
         vehicles = db.query(models.UserVehicle).filter(models.UserVehicle.user_id == user_id).all() 
@@ -611,7 +642,7 @@ def get_user_assets(request: Request, db: Session = Depends(get_db)):
         # return {"success": True, "data": local_data}
 
     except Exception as e:
-        print(e)
+        logger.info(e)
         return {"success": False, "message": "认证失败"}
 
 
@@ -643,13 +674,23 @@ def get_binding_code(req: EncryptedRequest, db: Session = Depends(get_db)):
         "isBound": user.is_bound
     }
 
-    # 存入内存 (5分钟有效)
-    manual_bind_db[code] = {
-        "user_info": user_data,
-        "expire_at": time.time() + 300
-    }
+    # 存入数据库 (5分钟有效)
+    # Check duplicate code? Rare but possible.
+    # Check if user already has a code? Might want to overwrite.
+    # For now, just insert.
+    
+    # Clean up old codes for this user? Optional.
+    
+    new_record = models.ManualBindCode(
+        code=code,
+        user_id=user.id,
+        user_info=user_data,
+        expire_at=int(time.time() + 300)
+    )
+    db.add(new_record)
+    db.commit()
 
-    print(f"生成绑定码 -> User:{user.nickname}, Code:{code}")
+    logger.info(f"生成绑定码 -> User:{user.nickname}, Code:{code}")
     return {"success": True, "code": code}
 
 class CodeRequest(BaseModel):
@@ -659,22 +700,17 @@ class CodeRequest(BaseModel):
 # --- 2. FiveM端使用绑定码查询用户 (给插件调用) ---
 @app.post("/api/bind/verify-code")
 def verify_binding_code(req: CodeRequest, db: Session = Depends(get_db)):
-    payload = decrypt_data(req.data)
-    if not payload:
-        return {"success": False, "message": "非法请求"}
-        
     code = req.code
     user_license = req.license
-    record = manual_bind_db.get(code)
+    record = db.query(models.ManualBindCode).filter(models.ManualBindCode.code == code).first()
 
     # 检查是否存在且未过期
-    if record and time.time() < record["expire_at"]:
-        # 验证成功，返回用户信息
-        user_info = record["user_info"]
+    if record and time.time() < record.expire_at:
+        # === 匹配成功 ===
         if user_license:
             try:
                 # 从缓存记录中获取用户 ID
-                user_id = record["user_info"].get("userId")
+                user_id = record.user_info.get("userId")
 
                 # 查询数据库
                 user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -683,17 +719,19 @@ def verify_binding_code(req: CodeRequest, db: Session = Depends(get_db)):
                     user.license = user_license
                     user.is_bound = True
                     db.commit()  # 提交保存
-                    print(f"自动绑定成功 -> 用户:{user.nickname}, License:{user_license}")
+                    logger.info(f"自动绑定成功 -> 用户:{user.nickname}, License:{user_license}")
             except Exception as e:
-                print(f"自动绑定更新失败: {e}")
+                logger.info(f"自动绑定更新失败: {e}")
         # ★ 重要：获取一次后立即删除，防止重复使用
-        del manual_bind_db[code]
-
-        return {"success": True, "data": user_info}
+        db.delete(record)
+        db.commit()
+        
+        return {"success": True, "data": record.user_info}
     else:
-        # 如果过期了顺手清理
-        if record: del manual_bind_db[code]
-        return {"success": False, "message": "绑定码无效或已过期"}
+        if record:
+            db.delete(record)
+            db.commit()
+        return {"success": False, "message": "无效或已过期的绑定码"}
 
 
 # --- 1.1 Store Public APIs ---
@@ -724,7 +762,7 @@ def api_get_user_info(request: Request, db: Session = Depends(get_db)):
 
     try:
         # 2. 解码 Token 获取 UserID
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, config.JWT_SECRET, algorithms=[config.JWT_ALGORITHM])
         user_id = payload.get("userId")
 
         # 3. 查最新数据库
@@ -784,7 +822,7 @@ def api_get_user_info(request: Request, db: Session = Depends(get_db)):
             "data": encrypt_data(user_data)
         }
     except Exception as e:
-        print(f"Token验证失败: {e}")
+        logger.info(f"Token验证失败: {e}")
         return {"success": False, "message": "Token无效"}
 
 
@@ -891,7 +929,7 @@ def admin_get_stats(admin: models.User = Depends(get_current_admin), db: Session
             }
         }
     except Exception as e:
-        print(e)
+        logger.info(e)
         return {"success": False, "message": "获取统计失败"}
 
 
@@ -1023,15 +1061,34 @@ def admin_delete_banner(banner_id: int, admin: models.User = Depends(get_current
 def admin_get_users(q: str = None, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
     query = db.query(models.User)
     if q:
-        query = query.filter(or_(models.User.phone.like(f"{q}%"), models.User.nickname.like(f"%{q}%")))
+        query = query.filter(or_(
+            models.User.phone.like(f"{q}%"), 
+            models.User.nickname.like(f"%{q}%"),
+            func.concat(
+                func.json_unquote(models.User.charinfo['firstname']), 
+                ' ', 
+                func.json_unquote(models.User.charinfo['lastname'])
+            ).like(f"%{q}%")
+        ))
     
     users = query.limit(50).all() # 限制返回数量
     data = []
     for u in users:
+        # Determine username from charinfo
+        username = u.nickname
+        if u.charinfo and isinstance(u.charinfo, dict):
+            fname = u.charinfo.get("firstname", "")
+            lname = u.charinfo.get("lastname", "")
+            if fname or lname:
+                username = f"{fname} {lname}".strip()
+
         user_data = {
             "id": u.id,
             "phone": u.phone,
             "nickname": u.nickname,
+            "username": username,
+            "isBound": u.is_bound,
+            "license": u.license,
             "isAdmin": u.is_admin,
             "isSuperAdmin": u.is_super_admin,
             "permissions": u.admin_permissions or [],
@@ -1118,4 +1175,29 @@ def admin_unban_user(user_id: int, admin: models.User = Depends(get_current_admi
             sync_ban_to_fivem(user.license, False)
             
     return {"success": True}
+
+# --- Image Proxy Interface ---
+@app.get("/api/image/{image_name}")
+def proxy_image(image_name: str):
+    # Ensure extension is present
+    if not image_name.endswith(".png"):
+        image_name += ".png"
+        
+    target_url = f"http://103.91.209.102:30120/qb-qrlogin/api/image/{image_name}"
+    
+    # Add headers to mimic browser
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    try:
+        resp = requests.get(target_url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            return Response(content=resp.content, media_type="image/png")
+        else:
+            return Response(status_code=404)
+    except Exception as e:
+        logger.error(f"Image proxy error: {e}")
+        return Response(status_code=500)
+
 # 启动命令: uvicorn main:app --reload

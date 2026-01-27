@@ -12,7 +12,7 @@ router = APIRouter()
 
 @router.get("/subscription/plans")
 def get_subscription_plans(db: Session = Depends(get_db)):
-    plans = db.query(models.SubscriptionPlan).filter(models.SubscriptionPlan.is_active == True).all()
+    plans = db.query(models.SubscriptionPlan).filter(models.SubscriptionPlan.is_active == True, models.SubscriptionPlan.is_deleted == False).all()
     data = []
     for p in plans:
         data.append({
@@ -63,7 +63,7 @@ def subscribe_to_plan(data: dict = Body(...), user: models.User = Depends(get_cu
         return {"success": False, "message": "参数错误"}
         
     plan = db.query(models.SubscriptionPlan).filter(models.SubscriptionPlan.id == plan_id).first()
-    if not plan or not plan.is_active:
+    if not plan or not plan.is_active or plan.is_deleted:
         return {"success": False, "message": "订阅计划不存在或已下架"}
         
     # Check Balance (Assist user pays with Bank)
@@ -106,7 +106,7 @@ def subscribe_to_plan(data: dict = Body(...), user: models.User = Depends(get_cu
 
 @router.get("/admin/subscription/plans")
 def admin_get_plans(admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    plans = db.query(models.SubscriptionPlan).all()
+    plans = db.query(models.SubscriptionPlan).filter(models.SubscriptionPlan.is_deleted == False).all()
     data = []
     for p in plans:
         data.append({
@@ -126,7 +126,8 @@ def admin_create_plan(data: dict = Body(...), admin: models.User = Depends(get_c
         price=data.get("price", 0),
         duration=data.get("duration", 30),
         description=data.get("description"),
-        is_active=True
+        is_active=True,
+        is_deleted=False
     )
     db.add(new_plan)
     db.commit()
@@ -150,6 +151,8 @@ def admin_update_plan(plan_id: int, data: dict = Body(...), admin: models.User =
 def admin_delete_plan(plan_id: int, admin: models.User = Depends(get_current_admin), db: Session = Depends(get_db)):
     plan = db.query(models.SubscriptionPlan).filter(models.SubscriptionPlan.id == plan_id).first()
     if plan:
-        db.delete(plan)
+        # Soft delete
+        plan.is_deleted = True
+        plan.is_active = False # Also deactivate it
         db.commit()
     return {"success": True}

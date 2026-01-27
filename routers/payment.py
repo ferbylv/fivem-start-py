@@ -10,6 +10,9 @@ import datetime
 import os
 import ssl
 import config
+import logging
+
+logger = logging.getLogger("payment")
 
 # MacOS SSL Fix for Dev/Sandbox
 if os.environ.get("ALIPAY_DEBUG", "True") == "True":
@@ -19,10 +22,13 @@ if os.environ.get("ALIPAY_DEBUG", "True") == "True":
         pass
 
 # Try to import Alipay, but handle if not installed (Simulating environment)
+ALIPAY_IMPORT_ERROR = None
 try:
     from alipay import AliPay
-except ImportError:
+except ImportError as e:
+    ALIPAY_IMPORT_ERROR = str(e)
     AliPay = None
+    logger.error(f"Failed to import alipay: {e}")
 
 router = APIRouter()
 
@@ -30,7 +36,7 @@ router = APIRouter()
 
 def get_alipay_client():
     if not AliPay:
-        raise HTTPException(status_code=500, detail="alipay-sdk-python not installed")
+        raise HTTPException(status_code=500, detail=f"alipay-sdk-python not installed or import error: {ALIPAY_IMPORT_ERROR}")
     
     # Read Keys
     # For robust code, we should check if files exist
@@ -123,6 +129,10 @@ def create_alipay_payment(data: dict = Body(...), user: models.User = Depends(ge
         product = db.query(models.Product).filter(models.Product.id == product_id).first()
         if not product: return {"success": False, "message": "Product not found"}
         
+        # Check Stock
+        if product.stock < quantity:
+            return {"success": False, "message": "库存不足"}
+        
         total_amount = product.price * quantity
         subject = f"Product: {product.name}"
         
@@ -184,17 +194,18 @@ def create_alipay_payment(data: dict = Body(...), user: models.User = Depends(ge
             subject=subject,
             out_trade_no=order_id,
             total_amount=amount_str,
-            return_url="http://localhost:3000/", # Frontend return page (Synchronous)
+            return_url=config.ALIPAY_RETURN_URL, # Frontend return page (Synchronous)
             notify_url=config.ALIPAY_NOTIFY_URL # Asynchronous Callback
         )
         
-        gateway = "https://openapi-sandbox.dl.alipaydev.com/gateway.do" if ALIPAY_DEBUG else "https://openapi.alipay.com/gateway.do"
+        gateway = "https://openapi-sandbox.dl.alipaydev.com/gateway.do" if config.ALIPAY_DEBUG else "https://openapi.alipay.com/gateway.do"
         pay_url = f"{gateway}?{order_string}"
-        print(pay_url)
+        pay_url = f"{gateway}?{order_string}"
+        logger.info(f"Generated Pay URL: {pay_url}")
         return {"success": True, "data": {"orderId": order_id, "payUrl": pay_url}}
             
     except Exception as e:
-        print(f"Alipay Create Error: {e}")
+        logger.error(f"Alipay Create Error: {e}")
         return {"success": False, "message": str(e)}
 
 @router.post("/payment/alipay/notify")
@@ -221,8 +232,9 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
                 fulfill_order(order, db)
                 db.commit()
             return "success"
+            return "success"
     except Exception as e:
-        print(f"Notify Error: {e}")
+        logger.error(f"Notify Error: {e}")
         
     return "failure"
 
@@ -263,28 +275,43 @@ def fulfill_order(order, db: Session):
                    db.add(new_sub)
 
     elif order.type == "product":
-        # Add to inventory logic (existing)
-        # Check Vehicle Delivery
+        # Add to inventory logic
         all_delivered = True
         has_vehicle = False
         
         for item in order.items:
-            # Grant Vehicle if applicable
+            # Decrement Stock
             if item.product_id:
                 product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
-                if product and product.vehicle_model:
-                     has_vehicle = True
-                     # Call FiveM API
-                     success = give_vehicle_to_fivem(user.license, product.vehicle_model, product.garage)
-                     if not success:
-                         all_delivered = False
-                         
+                if product:
+                    # Decrease stock
+                    if product.stock >= item.quantity:
+                         product.stock -= item.quantity
+                         db.add(product)
+                    else:
+                         # Log error, stock insufficient at fulfillment time (race condition?)
+                         # For now we just log it, but proceeding might be safer or refunding.
+                         # Assuming strict check at creation reduces this risk.
+                         logger.warning(f"Stock insufficient for product {product.id} during fulfillment. Stock: {product.stock}, Quantity: {item.quantity}")
+                         product.stock = 0 # Or handle otherwise.
+                         db.add(product)
+
+                    # Grant Vehicle if applicable
+                    if product.vehicle_model:
+                        has_vehicle = True
+                        # Call FiveM API
+                        success = give_vehicle_to_fivem(user.license, product.vehicle_model, product.garage)
+                        if not success:
+                            all_delivered = False
+                    
+                    # Grant Normal Item (if implemented later in user_inventory)
+                    # For now just stock decrement is requested.
+                          
         if has_vehicle and all_delivered:
              order.is_delivered = True
              
-        # TODO: Add logic for standard items (Inventory) if needed
-        # Currently assuming 'Product' only triggers Vehicle Delivery or purely monetary/credits transaction stored elsewhere, 
-        # or relying on FiveM Sync to update inventory later. 
+        # Commit stock changes
+        db.commit() 
 
 def give_vehicle_to_fivem(license, vehicle, garage):
     """
@@ -303,14 +330,14 @@ def give_vehicle_to_fivem(license, vehicle, garage):
     token = config.FIVEM_API_TOKEN 
     
     try:
-        print(f"[VehicleDelivery] Sending {vehicle} to {license}")
+        logger.info(f"[VehicleDelivery] Sending {vehicle} to {license}")
         resp = requests.post(url, json=payload, headers={"Authorization": token}, timeout=5)
         if resp.status_code == 200 and resp.json().get("success"):
-             print(f"[VehicleDelivery] Success: {resp.json()}")
+             logger.info(f"[VehicleDelivery] Success: {resp.json()}")
              return True
         else:
-             print(f"[VehicleDelivery] Failed: {resp.text}")
+             logger.error(f"[VehicleDelivery] Failed: {resp.text}")
              return False
     except Exception as e:
-        print(f"[VehicleDelivery] Exception: {e}")
+        logger.error(f"[VehicleDelivery] Exception: {e}")
         return False
